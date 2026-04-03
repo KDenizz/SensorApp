@@ -1,0 +1,1 @@
+# AppContext'i inject olarak alır. Döngüyü işletir.

@@ -1,0 +1,79 @@
+"Servo App
+Özel Gem
+Servo App şunu dedi:
+Belirttiğiniz eksikler, mimariyi prototip aşamasından çıkarıp gerçek bir endüstriyel "Production" (Üretim) seviyesine taşıyan en kritik noktalardı. Katman ihlalinin (layer violation) engellenmesi, dependency injection (bağımlılık enjeksiyonu) kullanımı ve öncelikli komut kuyruğu (priority queue) mantığı sisteme tam olarak entegre edildi.
+Aşağıda, hiçbir kod bloğu içermeyen, tamamen güncellenmiş ve endüstri standartlarına oturtulmuş nihai sistem mimarisi yer almaktadır:
+1. Dosya ve Klasör Yapısı (Nihai Production Mimarisi)
+servo_valve_app/
+│
+├── main.py                     # Sadece AppContext'i başlatır, Thread'lere enjekte eder ve run() çağırır.
+│
+├── config/                     # --- MERKEZİ KONFİGÜRASYON ---
+│   ├── hardware.yaml           
+│   ├── pid_defaults.yaml       # Kp, Ki, Kd, output_min, output_max, integral_limit (Anti-windup)
+│   ├── fluid_tables/           
+│   └── valve_profiles/         
+│       └── valve_type_A.yaml   # pitch_mm, max_stroke_mm ve açıklık(%) -> CV/CD tablosu
+│
+├── core/                       # --- TEMEL VERİ YAPILARI, CONTEXT VE SİNYALLER ---
+│   ├── app_context.py          # (YENİ) Singleton: Tüm Queue'ları (raw, log, command) ve SignalBus'ı barındırır.
+│   ├── datatypes.py            # SensorPacket, ComputedPacket, AlarmCode, CommandType ve MotorCommand
+│   └── signal_bus.py           # QObject alt sınıfı olarak tanımlanmış Singleton PyQt5 sinyal havuzu
+│
+├── ui/                         # --- 1. UI KATMANI (Main Thread) ---
+│   ├── main_window.py          # AppContext'i alır, SignalBus'a abone (subscribe) olur.
+│   └── views/
+│       ├── plot_manager.py     
+│       └── static_plots.py     # is_characterized() True olana kadar "Kalibrasyon Bekleniyor" çizer.
+│
+├── controller/                 # --- 2. CONTROLLER KATMANI (Thread 2) ---
+│   ├── main_controller.py      # AppContext'i inject olarak alır. Döngüyü işletir.
+│   ├── states/                 
+│   │   ├── base_state.py
+│   │   ├── calibrating_state.py# FINDING_ZERO ve FINDING_MAX alt durumlarını (sub-states) içerir.
+│   │   └── fault_safe_state.py # HAL'e dokunmaz, command_queue'ya EMERGENCY (priority=0) komut atar.
+│   └── pid_core.py             # Bumpless transfer, reset_integral() ve output tracking içerir.
+│
+├── computation/                # --- 3. COMPUTATION KATMANI ---
+│   ├── valve_characteristic.py # 0-100% arası tablodan CV/CD interpolasyonu yapar.
+│   ├── flow_calculators.py     # ValveCharacteristic bağımlılığını alır.
+│   └── fluid_dynamics.py       
+│
+└── hal/                        # --- 4. DONANIM KATMANI (Thread 1, Thread 3, Thread 4) ---
+    ├── hal_reader.py           # Thread 1: Arduino -> parse -> raw_data_queue
+    ├── hal_writer.py           # Thread 3: command_queue (PriorityQueue) -> Arduino
+    ├── telemetry_parser.py     
+    └── data_logger.py          # Thread 4: log_queue -> CSV/TXT
+2. Çekirdek Yapılar ve Veri Tipleri (Core & Datatypes)
+* `AppContext` (Singleton): Uygulamanın bel kemiğidir. Thread'ler oluşturulurken parametre olarak sadece bu nesneyi alırlar (Dependency Injection). İçerisinde `raw_data_queue`, `command_queue` (PriorityQueue yapısında), `log_queue` ve `SignalBus` referanslarını tutar.
+* `SignalBus` (QObject): PyQt5 kısıtlamaları gereği bir `QObject` alt sınıfıdır. `sensor_data_ready`, `computed_data_ready`, `state_changed` ve `alarm_triggered` sinyallerini (`pyqtSignal`) barındırır. UI bileşenleri bu nesne üzerinden dinleme yapar.
+* `MotorCommand` (Dataclass): Controller'dan HAL Writer'a giden emir paketidir.
+   * `cmd_type`: Enum (POSITION, PWM, STOP, EMERGENCY).
+   * `value`: Float (Hedeflenen mm, %, PWM değeri veya durma komutuysa null).
+   * `priority`: Integer. (Normal komutlar = 1, `EMERGENCY` komutları = 0). `command_queue` bir öncelikli kuyruk (Priority Queue) olduğu için, 0 öncelikli paket kuyruğun en önüne geçer ve bekleyen normal komutları ezer.
+* 
+
+3. Davranışsal Durum Makinesi (State Machine) Güncellemeleri
+* `CalibratingState` (Alt Durumlar Eklendi):
+   * Sub-State 1: `FINDING_ZERO` -> Başlangıçta çalışır. Çıkış basıncı ($P_2$) sıfırlanana kadar valfi kapatma komutu yollar. $P_2=0$ olduğunda burayı %0 referansı kabul eder ve `FINDING_MAX`'a geçer.
+   * Sub-State 2: `FINDING_MAX` -> Valfi yavaşça açar. $P_2$ değeri yükselip sabitlendiği anı algılar. Orayı %100 strok referansı kabul eder.
+   * Karakterizasyon: Her iki adım başarıyla bittiğinde elde edilen strok-basınç verileriyle `ValveCharacteristic` tablosunu doldurur ve `is_characterized()` metodunun `True` dönmesini sağlar. Arayüzdeki statik grafikler ancak bu bayrak `True` olduğunda çizilmeye başlar.
+* `FaultSafeState` (Katman İzolasyonu Sağlandı):
+   * Donanıma doğrudan erişmez. `on_enter()` metodu tetiklendiğinde; `MotorCommand(cmd_type=EMERGENCY, value=GÜVENLİ_POZİSYON, priority=0)` nesnesi oluşturur.
+   * Bu nesneyi `AppContext` üzerinden `command_queue`'ya yollar. Donanım katmanı (`HalWriter`) bu yüksek öncelikli komutu anında işleyerek sistemi güvenli hale getirir. Katman kuralı (Layer kısıtlaması) korunmuş olur.
+* 
+4. Sistem Akışı (Dependency Injection ile)
+1. Başlatma (Boot): `main.py` çalışır. Sadece `AppContext` örneğini yaratır. `HalReader`, `MainController`, `HalWriter` ve `DataLogger` thread'lerini ayağa kaldırırken `AppContext`'i argüman olarak içlerine enjekte eder ve çalıştırır. `main.py` aradan çekilir.
+2. Okuma ve Yönlendirme: `HalReader` sürekli sensör verisi üretir ve `AppContext.raw_data_queue`'ya bırakır.
+3. Karar ve Hesaplama: `MainController` bu veriyi kuyruktan alır, duruma (State) bakar, gerekirse PID hesaplar ve üretilen sonucu `MotorCommand` nesnesi olarak `AppContext.command_queue`'ya bırakır.
+4. Aksiyon (HAL Write): `HalWriter` kuyrukta bekleyen en yüksek öncelikli komutu alır ve fiziksel olarak Arduino'ya (Seri Port üzerinden) yazar.
+5. Arayüz (UI) Tepkisi: Tüm bu işlemler olurken `MainController`, işlenmiş verileri `AppContext.SignalBus` üzerinden yayınlar. Arayüz (Main Thread) bu sinyalleri yakaladıkça ekranı asenkron olarak günceller; asla donma yaşamaz."
+
+
+Mimari finalize. Önerilen kod yazma sırası:
+1 → core/ (datatypes, app_context, signal_bus) — her şeyin bağımlı olduğu temel
+2 → hal/ (reader + parser, writer, logger) — gerçek donanım olmadan mock ile test et
+3 → computation/ (valve_characteristic, flow_calculators) — unit test yazılabilir, donanım gerektirmez
+4 → controller/ (state machine + PID) — computation'a bağlı
+5 → ui/ — en son, çünkü sadece sinyal dinler
+

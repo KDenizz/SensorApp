@@ -1,0 +1,1 @@
+# ValveCharacteristic bağımlılığını alır.

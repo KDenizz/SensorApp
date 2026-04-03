@@ -1,0 +1,1 @@
+# HAL'e dokunmaz, command_queue'ya EMERGENCY (priority=0) komut atar.

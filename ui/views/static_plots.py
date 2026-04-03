@@ -1,0 +1,1 @@
+# is_characterized() True olana kadar "Kalibrasyon Bekleniyor" çizer.

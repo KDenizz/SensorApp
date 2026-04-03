@@ -1,0 +1,1 @@
+ # Sadece AppContext'i başlatır, Thread'lere enjekte eder ve run() çağırır.

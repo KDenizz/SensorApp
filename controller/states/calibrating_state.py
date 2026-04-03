@@ -1,0 +1,1 @@
+# FINDING_ZERO ve FINDING_MAX alt durumlarını (sub-states) içerir.
