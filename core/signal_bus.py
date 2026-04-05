@@ -1,7 +1,7 @@
 # QObject alt sınıfı olarak tanımlanmış Singleton PyQt5 sinyal havuzu
 
 from PyQt5.QtCore import QObject, pyqtSignal
-from core.datatypes import SensorPacket, ComputedPacket, SystemState, AlarmCode
+from core.data_types import SensorPacket, ComputedPacket, SystemState, AlarmCode
 
 class SignalBus(QObject):
     """

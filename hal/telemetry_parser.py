@@ -1,6 +1,6 @@
 
 import time
-from core.datatypes import SensorPacket
+from core.data_types import SensorPacket
 
 class TelemetryParser:
     """

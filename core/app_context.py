@@ -2,10 +2,12 @@ import threading
 import logging
 from queue import PriorityQueue, Queue
 from typing import Tuple
+import optional
 
 from core.signal_bus import SignalBus
-from core.datatypes import MotorCommand, CommandType, SensorPacket
+from core.data_types import MotorCommand, CommandType, SensorPacket, ControlMode
 from core.config_parser import ConfigParser
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,17 @@ class AppContext:
         
         # 6. Shutdown koruması
         self._shutdown_requested = False
-        
+
+        self.log_queue: Queue[Dict[str, Any]] = Queue() 
+
+        self.last_sensor_packet: Optional[SensorPacket] = None
+        self.control_mode: ControlMode = ControlMode.POSITION
+        # Kalibrasyon Verileri (Tip güvenliği için açıkça tanımlandı)
+        self.is_calibrated: bool = False
+        self.zero_tick: int = 0
+        self.max_tick: int = 0
+        self.total_stroke_ticks: int = 0
+
         self._initialized = True
         logger.info("AppContext başlatma tamamlandı.")
 

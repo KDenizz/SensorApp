@@ -4,7 +4,7 @@ from queue import Empty
 import time
 
 from core.app_context import AppContext
-from core.datatypes import MotorCommand, CommandType, AlarmCode
+from core.data_types import MotorCommand, CommandType, AlarmCode
 from hal.serial_port_manager import SerialPortManager
 
 logger = logging.getLogger(__name__)

@@ -8,7 +8,7 @@ import logging
 from queue import Empty
 
 from core.app_context import AppContext
-from core.datatypes import SensorPacket, AlarmCode
+from core.data_types import SensorPacket, AlarmCode
 from hal.serial_port_manager import SerialPortManager  
 
 logger = logging.getLogger(__name__)

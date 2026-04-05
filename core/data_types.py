@@ -11,6 +11,10 @@ class AlarmCode(IntEnum):
     SENSOR_OUT_OF_RANGE = 3
     MOTOR_OVER_TORQUE = 4
     LIMIT_EXCEEDED = 5
+    CALIBRATION_TIMEOUT = 6
+    CALIBRATION_FAILED = 7
+    NOT_CALIBRATED = 8
+
 
 class CommandType(Enum):
     """Motor ve sistem kontrol komut tipleri."""
@@ -20,6 +24,8 @@ class CommandType(Enum):
     SET_TORQUE = auto()     # Tork limitini güncelle
     STOP_IMMEDIATE = auto() # Acil durdurma
     CALIBRATE = auto()      # Kalibrasyon rutinini başlat
+    MOVE_VELOCITY = auto()  # Hız ve yön tabanlı sürekli hareket
+    STOP = auto()           # Durdurma
 
 class ControlMode(Enum):
     """Aktif kontrol algoritmaları."""
@@ -27,10 +33,12 @@ class ControlMode(Enum):
     PRESSURE = "Pressure"
     FLOW = "Flow"
     REGULATOR = "Regulator"
+    DELTA_P = "Delta_P" # Yazılım hesaplar dosyanızdaki ∆P grafikleri ve hesabı için
 
 class FlowRegime(Enum):
     NORMAL = "Normal"
     CHOKED = "Choked"
+    UNKNOWN = "Unknown"
 
 class SystemState(Enum):
     IDLE = auto()
@@ -44,12 +52,12 @@ class SystemState(Enum):
 @dataclass(frozen=True)
 class SensorPacket:
     """Hardware Layer'dan (HAL) gelen ham sensör verileri."""
-    p1_raw: float           # Giriş Basıncı (bar) [cite: 1, 643]
-    p2_raw: float           # Çıkış Basıncı (bar) [cite: 3, 643]
-    temp_k: float           # Akışkan Sıcaklığı (Kelvin) [cite: 644, 645]
-    motor_pos_ticks: int    # Encoder'dan okunan ham tick değeri [cite: 647]
-    motor_current_ma: float # Motordan okunan akım (mA) [cite: 502, 691]
-    timestamp: float        # Verinin alındığı sistem zamanı
+    p1_raw: float = 0.0           # Giriş Basıncı (bar) [cite: 1, 643]
+    p2_raw: float = 0.0            # Çıkış Basıncı (bar) [cite: 3, 643]
+    temp_k: float = 0.0            # Akışkan Sıcaklığı (Kelvin) [cite: 644, 645]
+    motor_pos_ticks: int = 0       # Encoder'dan okunan ham tick değeri [cite: 647]
+    motor_current_ma: float = 0.0   # Motordan okunan akım (mA) [cite: 502, 691]
+    timestamp: float = 0.0          # Verinin alındığı sistem zamanı
 
 @dataclass(frozen=True)
 class ComputedPacket:
@@ -67,6 +75,7 @@ class MotorCommand:
     """PriorityQueue üzerinden HAL'e iletilen komut nesnesi."""
     type: CommandType
     value: float = 0.0      # Hedef konum, hız veya tork değeri
+    direction: int = 1       # 1: Aç, -1: Kapat
     priority: int = 1       # 0: Emergency, 1: Normal [Finalize Mimari]
     metadata: Dict[str, float] = field(default_factory=dict)  # Ek bilgi (örneğin, hız değişimi için hız limiti, konum değişimi için tolerans vb.)""
 
