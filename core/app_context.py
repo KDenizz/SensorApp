@@ -2,7 +2,7 @@ import threading
 import logging
 from queue import PriorityQueue, Queue
 from typing import Tuple
-import optional
+import optional 
 
 from core.signal_bus import SignalBus
 from core.data_types import MotorCommand, CommandType, SensorPacket, ControlMode
