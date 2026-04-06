@@ -10,13 +10,26 @@ from core.config_parser import ConfigParser
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
+"""
+AppContext: Sistem genelindeki paylaşımlı, asenkron kaynakları barındıran Singleton bağlam sınıfı.
+"""
+
+import asyncio
+import logging
+from typing import Tuple, Dict, Any, Optional
+
+from core.data_types import MotorCommand, CommandType, SensorPacket, ControlMode
+from core.config_parser import ConfigParser
+from server.ws_broadcaster import WsBroadcaster
+
+logger = logging.getLogger(__name__)
 
 class AppContext:
     """
-    Sistem genelindeki paylaşımlı, thread-safe kaynakları barındıran Singleton bağlam sınıfı.
-    Konfigürasyon, komut ve veri kuyrukları ile sinyal barasına merkezi erişim sağlar.
+    Sistem genelindeki paylaşımlı, asenkron kaynakları barındıran Singleton bağlam sınıfı.
+    Konfigürasyon, komut ve veri kuyrukları ile WebSocket broadcaster'a merkezi erişim sağlar.
     """
-    _instance: "AppContext | None" = None
+    _instance: Optional["AppContext"] = None
     _initialized: bool = False
 
     def __new__(cls) -> "AppContext":
@@ -26,9 +39,9 @@ class AppContext:
 
     def __init__(self) -> None:
         """
-        AppContext sınıfını başlatır.
-        Multithreaded yapıdaki thread-safe kuyrukları, sinyal barasını 
-        ve salt okunur (read-only) sistem konfigürasyonlarını oluşturur.
+        AppContext sınıfının senkron (Event Loop bağımsız) kısmını başlatır.
+        Sadece konfigürasyon gibi I/O engeli yaratmayan bileşenler burada yüklenir.
+        Asenkron primitifler initialize_async() içerisinde yaratılacaktır.
         """
         if self._initialized:
             return
@@ -41,40 +54,47 @@ class AppContext:
             logger.critical(f"Kritik konfigürasyon yüklenemedi: {e}")
             raise  # main.py tarafında yakalanıp UI hatası olarak gösterilecek
 
-        # 2. Merkezi Sinyal Barası (Event-Driven iletişim için)
-        self.signal_bus = SignalBus()
+        # 2. Asenkron Primitiflerin Referansları (Lazy Init için None ataması)
+        self.broadcaster: Optional[WsBroadcaster] = None
+        self.command_queue: Optional[asyncio.PriorityQueue[Tuple[int, MotorCommand]]] = None
+        self.raw_data_queue: Optional[asyncio.Queue[SensorPacket]] = None
+        self.log_queue: Optional[asyncio.Queue[Dict[str, Any]]] = None
+        self.stop_event: Optional[asyncio.Event] = None
         
-        # 3. Thread-Safe Kuyruklar (Inter-Thread Haberleşme)
-        # Motor komutları (Priority: 0=Acil, 1=Normal)
-        self.command_queue: PriorityQueue[Tuple[int, MotorCommand]] = PriorityQueue()
-        # HAL'den Controller'a akan ham donanım okumaları
-        self.raw_data_queue: Queue[SensorPacket] = Queue()
-        # Sistem geneli asenkron dosya yazma işlemleri için log kuyruğu
-        self.log_queue: Queue[dict] = Queue()
-        
-        # 4. Graceful Shutdown (Güvenli Kapanış) Bayrağı
-        self.stop_event = threading.Event()
-        
-        # 6. Shutdown koruması
-        self._shutdown_requested = False
-
-        self.log_queue: Queue[Dict[str, Any]] = Queue() 
-
+        # 3. Durum Kontrol ve Korumalar
+        self._shutdown_requested: bool = False
         self.last_sensor_packet: Optional[SensorPacket] = None
         self.control_mode: ControlMode = ControlMode.POSITION
-        # Kalibrasyon Verileri (Tip güvenliği için açıkça tanımlandı)
+        
+        # 4. Kalibrasyon Verileri (Tip güvenliği için açıkça tanımlandı)
         self.is_calibrated: bool = False
         self.zero_tick: int = 0
         self.max_tick: int = 0
         self.total_stroke_ticks: int = 0
 
         self._initialized = True
-        logger.info("AppContext başlatma tamamlandı.")
+        logger.info("AppContext senkron başlatması tamamlandı. Event Loop bekleniyor.")
 
-
-    def request_shutdown(self) -> None:
+    async def initialize_async(self) -> None:
         """
-        Tüm sistemi güvenli bir şekilde kapatmak için stop_event bayrağını tetikler.
+        Event Loop (asyncio.run) ayağa kalktıktan sonra çağrılmalıdır.
+        Sistemin can damarı olan asenkron kuyrukları, event'leri ve Broadcaster'ı yaratır.
+        """
+        # Event Loop'a bağlı kuyruklar
+        self.command_queue = asyncio.PriorityQueue()
+        self.raw_data_queue = asyncio.Queue()
+        self.log_queue = asyncio.Queue()
+        self.stop_event = asyncio.Event()
+
+        # WebSocket Broadcaster'ı başlat
+        self.broadcaster = WsBroadcaster()
+        await self.broadcaster.initialize()
+
+        logger.info("AppContext asenkron bileşenleri (Broadcaster, Queue, Event) başlatıldı.")
+
+    async def request_shutdown(self) -> None:
+        """
+        Tüm sistemi güvenli bir şekilde kapatmak için stop_event bayrağını asenkron olarak tetikler.
         """
         if self._shutdown_requested:
             logger.debug("Shutdown zaten talep edilmiş.")
@@ -83,9 +103,12 @@ class AppContext:
         self._shutdown_requested = True
         logger.warning("Sistem kapatılıyor (EMERGENCY STOP tetiklendi).")
 
-        self.stop_event.set()
+        if self.stop_event:
+            self.stop_event.set()
         
         # Güvenlik önlemi: Kapanış istendiğinde donanımı anında durdurmayı garantiye al.
-        emergency_stop = MotorCommand(type=CommandType.STOP_IMMEDIATE, priority=0)
-        self.command_queue.put((0, emergency_stop))
-        logger.debug("EMERGENCY STOP komutu command_queue'ya eklendi.")
+        if self.command_queue:
+            emergency_stop = MotorCommand(type=CommandType.STOP_IMMEDIATE, priority=0)
+            # await kullanmak, kuyruk mekanizmasının asenkron yapısıyla tam uyum sağlar
+            await self.command_queue.put((0, emergency_stop))
+            logger.debug("EMERGENCY STOP komutu command_queue'ya eklendi.")

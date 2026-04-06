@@ -1,169 +1,215 @@
-# Thread 1: Arduino -> parse -> raw_data_queue
+"""
+hal/hal_reader.py
 
-# hal/hal_reader.py (GÜNCELLENMİŞ)
+[HAL Layer] Donanımdan sensör verilerini asenkron olarak okuyan görev (asyncio.Task).
 
-import threading
-import time
+Migration Notları (threading.Thread → asyncio.Task):
+    1. `threading.Thread` subclass'ı                → Düz class. `run()` metodu `async def` oldu.
+    2. `time.sleep(sleep_time)`                      → `await asyncio.sleep(sleep_time)`
+    3. `self.context.stop_event.is_set()`            → `self.context.stop_event.is_set()` (aynı API, asyncio.Event)
+    4. `self.context.raw_data_queue.put(packet)`     → `await self.context.raw_data_queue.put(packet)`
+    5. `self.context.signal_bus.alarm_triggered...`  → `await self.context.broadcaster.publish("ALARM_TRIGGERED", ...)`
+    6. `self.context.signal_bus.sensor_data_ready...`→ `await self.context.broadcaster.publish("SENSOR_DATA", ...)`
+    7. Seri port okuma (blocking `readline`)         → `loop.run_in_executor(None, ...)` ile thread pool'da
+
+Mimari Kural:
+    - Bu katman Controller'a doğrudan DOKUNMAZ.
+    - Veri yalnızca context.raw_data_queue'ya bırakılır.
+    - UI bildirimi yalnızca context.broadcaster.publish() ile yapılır.
+
+Not (Mock):
+    AppContext üzerindeki `get_mock_position()` ve `set_mock_current()` metodları
+    gerçek donanım geldiğinde kaldırılacak. Tüm fizik simülasyonu bu sınıfta kalmaya devam eder.
+"""
+
+from __future__ import annotations
+
+import asyncio
 import logging
-from queue import Empty
+import time
+from typing import TYPE_CHECKING
 
-from core.app_context import AppContext
 from core.data_types import SensorPacket, AlarmCode
-from hal.serial_port_manager import SerialPortManager  
+from hal.serial_port_manager import AsyncSerialPortManager
+
+if TYPE_CHECKING:
+    from core.app_context import AppContext
 
 logger = logging.getLogger(__name__)
 
 
-class HALReader(threading.Thread):
+class HALReader:
     """
-    [Thread 1] Donanımdan SADECE sensör verilerini okur.
-    Mock state AppContext'te tutulur, buradan okunur.
+    [HAL Layer] Donanımdan SADECE sensör verilerini okur ve `raw_data_queue`'ya bırakır.
+
+    Kullanım (main.py içinde):
+        reader = HALReader(context)
+        asyncio.create_task(reader.run())
     """
 
-    def __init__(self, context: AppContext) -> None:
-        super().__init__(name="HALReader-Thread")
+    def __init__(self, context: "AppContext") -> None:
         self.context = context
-        self.daemon = True
-        
+
         hw_config = self.context.config.hardware
         self.port_name: str = hw_config.get("port", "COM1")
         self.baud_rate: int = hw_config.get("baud_rate", 115200)
-        
+
         rate = hw_config.get("sample_rate_hz", 100)
         if rate <= 0:
             logger.warning(f"Geçersiz sample_rate_hz: {rate}, varsayılan 100Hz kullanılıyor.")
             self.sample_rate_hz = 100
         else:
             self.sample_rate_hz = rate
+
         self._loop_delay: float = 1.0 / self.sample_rate_hz
-        
-        # Mock sabitleri (AppContext'teki state'ten bağımsız)
-        self._mock_p1: float = 50.0      # Giriş basıncı sabit
-        self._mock_temp: float = 298.15  # Sıcaklık sabit
-        
+
+        # Mock sabitleri
+        self._mock_p1: float = 50.0
+        self._mock_temp: float = 298.15
+
         self._is_connected: bool = False
         self._reconnect_attempts: int = 0
         self._max_reconnect_attempts: int = 5
-        self.serial_manager = SerialPortManager()
 
-    def run(self) -> None:
-        """Sadece okuma döngüsü."""
-        try:
-            self._connect_to_hardware()
-        except ConnectionError as e:
-            logger.critical(str(e))
-            self.context.signal_bus.alarm_triggered.emit(int(AlarmCode.COMMUNICATION_LOST))
+        self.serial_manager = AsyncSerialPortManager()
+
+    # ------------------------------------------------------------------
+    # Ana Döngü
+    # ------------------------------------------------------------------
+
+    async def run(self) -> None:
+        """
+        asyncio.Task olarak çalışan ana okuma döngüsü.
+        stop_event set edildiğinde döngüden çıkar ve bağlantıyı kapatır.
+        """
+        connected = await self._connect_to_hardware()
+        if not connected:
+            await self.context.broadcaster.publish(
+                "ALARM_TRIGGERED",
+                {"code": int(AlarmCode.COMMUNICATION_LOST), "reason": "HALReader başlangıç bağlantısı başarısız."}
+            )
             return
 
         logger.info(f"HALReader {self.sample_rate_hz}Hz hızında başlatıldı. Port: {self.port_name}")
-        
+
         while not self.context.stop_event.is_set():
             loop_start = time.monotonic()
 
             try:
-                self._read_incoming_sensors()
+                await self._read_incoming_sensors()
             except Exception as e:
                 logger.error(f"Okuma döngüsünde hata: {e}", exc_info=True)
-                self.context.signal_bus.alarm_triggered.emit(int(AlarmCode.COMMUNICATION_LOST))
-                self._handle_connection_loss()
+                await self.context.broadcaster.publish(
+                    "ALARM_TRIGGERED",
+                    {"code": int(AlarmCode.COMMUNICATION_LOST), "reason": str(e)}
+                )
+                recovered = await self._handle_connection_loss()
+                if not recovered:
+                    break
 
             elapsed = time.monotonic() - loop_start
             sleep_time = max(0.0, self._loop_delay - elapsed)
             if sleep_time > 0:
-                time.sleep(sleep_time)
+                await asyncio.sleep(sleep_time)  # ← blocking time.sleep() KALDIRILDI
 
-        self._disconnect_from_hardware()
+        await self._disconnect_from_hardware()
         logger.info("HALReader güvenli şekilde sonlandırıldı.")
 
-    def _connect_to_hardware(self) -> None:
-        """Retry mekanizmalı donanım bağlantısı."""
+    # ------------------------------------------------------------------
+    # Bağlantı Yönetimi
+    # ------------------------------------------------------------------
+
+    async def _connect_to_hardware(self) -> bool:
+        """
+        Retry mekanizmalı donanım bağlantısı.
+        Blocking `serial.Serial()` çağrısı run_in_executor ile thread pool'a gönderilir.
+
+        Returns:
+            bool: Bağlantı başarılıysa True, tüm denemeler tükendiyse False.
+        """
+        loop = asyncio.get_running_loop()
         retry_count = 0
-        
+
         while not self.context.stop_event.is_set() and retry_count < self._max_reconnect_attempts:
             try:
-                self.serial_manager.open(self.port_name, self.baud_rate)
+                # Blocking I/O → executor'a taşındı
+                await loop.run_in_executor(
+                    None,
+                    self.serial_manager.open,
+                    self.port_name,
+                    self.baud_rate
+                )
                 self._is_connected = True
                 self._reconnect_attempts = 0
                 logger.info(f"Donanıma bağlandı: {self.port_name}")
-                return
+                return True
             except Exception as e:
                 retry_count += 1
                 logger.error(f"Bağlantı hatası ({retry_count}/{self._max_reconnect_attempts}): {e}")
-                time.sleep(2)
-                
-        raise ConnectionError(f"Donanıma bağlanılamadı: {self.port_name}")
+                await asyncio.sleep(2.0)  # ← blocking time.sleep() değil
 
-    def _handle_connection_loss(self) -> None:
-        """Bağlantı kaybı durumunda yapılacak işlemler."""
+        logger.critical(f"Donanıma bağlanılamadı: {self.port_name}")
+        return False
+
+    async def _handle_connection_loss(self) -> bool:
+        """
+        Bağlantı kaybı durumunda kademeli retry.
+
+        Returns:
+            bool: Yeniden bağlantı başarılıysa True, maksimum deneme aşıldıysa False.
+        """
         self._is_connected = False
         self._reconnect_attempts += 1
-        
-        if self._reconnect_attempts >= self._max_reconnect_attempts:
-            logger.critical(f"Maksimum yeniden bağlanma denemesi ({self._max_reconnect_attempts}) aşıldı.")
-            self.context.request_shutdown()
-            return
-        
-        try:
-            self._connect_to_hardware()
-        except ConnectionError:
-            logger.error("Yeniden bağlanma başarısız, sonraki döngüde tekrar denenecek.")
 
-    def _disconnect_from_hardware(self) -> None:
+        if self._reconnect_attempts >= self._max_reconnect_attempts:
+            logger.critical(
+                f"Maksimum yeniden bağlanma denemesi ({self._max_reconnect_attempts}) aşıldı. "
+                "Sistem kapatılıyor."
+            )
+            await self.context.request_shutdown()
+            return False
+
+        logger.warning(
+            f"Bağlantı koptu. Yeniden bağlanılıyor... "
+            f"({self._reconnect_attempts}/{self._max_reconnect_attempts})"
+        )
+        return await self._connect_to_hardware()
+
+    async def _disconnect_from_hardware(self) -> None:
         """Donanım bağlantısını kapatır."""
-        self.serial_manager.close()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.serial_manager.close)
         self._is_connected = False
         logger.info("Donanım bağlantısı kapatıldı.")
 
-    def _update_mock_p2(self, opening_ratio: float) -> float:
-        """
-        Fiziksel gerçekliğe uygun P2 simülasyonu.
-        Valf açıldıkça downstream basıncı DÜŞER.
-        
-        Args:
-            opening_ratio: 0.0 (kapalı) - 1.0 (tam açık)
-        
-        Returns:
-            float: Simüle edilmiş P2 değeri (bar)
-        """
-        # P2: Valf tam kapalıyken 40 bar, tam açıkken 28 bar
-        return 40.0 - (opening_ratio * 12.0)
+    # ------------------------------------------------------------------
+    # Sensör Okuma
+    # ------------------------------------------------------------------
 
-    def _update_mock_current(self, opening_ratio: float) -> float:
-        """
-        Motor akımı simülasyonu.
-        Hareket halinde akım artar, sabit konumda düşer.
-        
-        Args:
-            opening_ratio: 0.0 (kapalı) - 1.0 (tam açık)
-        
-        Returns:
-            float: Simüle edilmiş akım değeri (mA)
-        """
-        # Basit simülasyon: açıklık %50 civarında maksimum akım
-        return 12.0 + abs(opening_ratio - 0.5) * 25.0
-
-    def _read_incoming_sensors(self) -> None:
+    async def _read_incoming_sensors(self) -> None:
         """
         Sensörlerden veri okur, parse eder ve sisteme yayınlar.
+
+        Gerçek donanımda:
+            raw_bytes = await loop.run_in_executor(None, self.serial_manager.readline)
+            packet = self._parser.parse_raw(raw_bytes)
+
+        Şu an mock verisi üretilmektedir.
         """
         if not self._is_connected:
             return
 
-        # Mock pozisyonu AppContext'ten al (HALWriter tarafından güncellenir)
+        # --- Mock Fizik ---
         current_pos = self.context.get_mock_position()
-        
-        # Açıklık oranını hesapla (max_tick = 1000 varsayımı)
-        max_tick = 1000  # TODO: config'den alınacak
+        max_tick = self.context.config.hardware.get("max_tick", 1000)
         opening_ratio = min(max(current_pos / max_tick, 0.0), 1.0)
-        
-        # Fiziksel büyüklükleri simüle et
+
         mock_p2 = self._update_mock_p2(opening_ratio)
         mock_current = self._update_mock_current(opening_ratio)
-        
-        # Mock akımı AppContext'e de yaz (tutarlılık için)
+
+        # Tutarlılık için mock akımı context'e yaz
         self.context.set_mock_current(mock_current)
-        
-        # SensorPacket oluştur
+
         packet = SensorPacket(
             p1_raw=self._mock_p1,
             p2_raw=mock_p2,
@@ -173,8 +219,20 @@ class HALReader(threading.Thread):
             timestamp=time.monotonic()
         )
 
-        # Controller için kuyruğa at
-        self.context.raw_data_queue.put(packet)
-        
-        # UI için sinyal yayın (object tipinde, SensorPacket taşır)
-        self.context.signal_bus.sensor_data_ready.emit(packet)
+        # Controller için kuyruğa at (non-blocking put)
+        await self.context.raw_data_queue.put(packet)
+
+        # UI için WebSocket üzerinden yayınla (signal_bus.sensor_data_ready → broadcaster)
+        await self.context.broadcaster.publish("SENSOR_DATA", packet)
+
+    # ------------------------------------------------------------------
+    # Mock Yardımcılar (Gerçek donanımda kaldırılacak)
+    # ------------------------------------------------------------------
+
+    def _update_mock_p2(self, opening_ratio: float) -> float:
+        """Valf açıldıkça downstream basıncı DÜŞER. (P2: 40 bar → 28 bar)"""
+        return 40.0 - (opening_ratio * 12.0)
+
+    def _update_mock_current(self, opening_ratio: float) -> float:
+        """Hareket halinde akım artar, %50 açıklıkta zirve yapar."""
+        return 12.0 + abs(opening_ratio - 0.5) * 25.0
