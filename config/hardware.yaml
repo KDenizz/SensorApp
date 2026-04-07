@@ -1,0 +1,78 @@
+# =============================================================================
+# config/hardware.yaml — Donanım Konfigürasyonu
+# =============================================================================
+#
+# Bu dosyadaki değerler AppContext üzerinden tüm katmanlara iletilir.
+# Değiştirilen her ayar için uygulamanın yeniden başlatılması gerekir.
+#
+# Kullanım (kod tarafında):
+#   self.context.config.hardware.get("port", "COM1")
+#
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Modbus RTU Seri Port Ayarları
+# -----------------------------------------------------------------------------
+
+# Seri port adresi.
+#   Windows : "COM3", "COM4", vb.
+#   Linux   : "/dev/ttyUSB0", "/dev/ttyS0", vb.
+port: "COM3"
+
+# Haberleşme hızı (bps). Slave cihazla eşleşmeli.
+baud_rate: 115200
+
+# Modbus Slave ID. Cihazın DIP switch veya yazılım ayarına göre belirlenir.
+slave_id: 1
+
+# Tek bir Modbus isteği için maksimum yanıt bekleme süresi (saniye).
+# Çok düşük → gereksiz timeout hatası. Çok yüksek → yavaş hata tespiti.
+modbus_timeout: 0.1
+
+
+# -----------------------------------------------------------------------------
+# Polling ve Zamanlama
+# -----------------------------------------------------------------------------
+
+# HALReader'ın Input Register'ları kaç Hz'de okuyacağı.
+# Önerilen aralık: 20–100 Hz.
+#   20 Hz  → her 50ms'de bir okuma  (düşük yük)
+#   50 Hz  → her 20ms'de bir okuma  (dengeli — varsayılan)
+#   100 Hz → her 10ms'de bir okuma  (yüksek çözünürlük, RS-485 yükü artar)
+sample_rate_hz: 50
+
+
+# -----------------------------------------------------------------------------
+# Hata Toleransı
+# -----------------------------------------------------------------------------
+
+# Bağlantı kesildiğinde kaç kez yeniden bağlanma denemesi yapılacağı.
+# Bu sayı aşılırsa sistem güvenli kapatma (request_shutdown) tetikler.
+max_reconnect_attempts: 5
+
+# Kaç ardışık Modbus okuma hatası sonrası COMMUNICATION_LOST alarmı üretileceği.
+# Tek seferlik gürültüyü gerçek kopuştan ayırt etmek için kullanılır.
+max_consecutive_errors: 10
+
+
+# -----------------------------------------------------------------------------
+# Motor ve Enkoder Parametreleri
+# -----------------------------------------------------------------------------
+
+# Motorun bir turuna karşılık gelen enkoder tick sayısı.
+# Controller katmanında tick → tur dönüşümü için kullanılır.
+# Kullandığınız enkoder/sürücü dokümanından alınmalıdır.
+ticks_per_turn: 10000
+
+# Modbus register haritasındaki adım çözünürlüğü (PPR — Pulse Per Revolution).
+# HALReader'da:  motor_pos_ticks = pos_rev * step_resolution + pos_step
+# HALWriter'da:  target_rev = total_ticks // step_resolution
+#                target_step = total_ticks  % step_resolution
+# modbus_registers.yaml içindeki step_resolution (40015) register'ı ile eşleşmeli.
+step_resolution: 1000
+
+# Vananın tam açık konumuna karşılık gelen maksimum tick değeri.
+# Kalibrasyon tamamlandıktan sonra bu değer güncellenir (AppContext.max_tick).
+# Burası başlangıç/varsayılan değeridir.
+max_tick: 10000

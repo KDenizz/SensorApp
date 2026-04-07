@@ -1,25 +1,22 @@
 """
 hal/hal_reader.py
 
-[HAL Layer] Donanımdan sensör verilerini asenkron olarak okuyan görev (asyncio.Task).
+[HAL Layer] Modbus RTU üzerinden Input Register'ları asenkron olarak
+polling eden görev (asyncio.Task).
 
-Migration Notları (threading.Thread → asyncio.Task):
-    1. `threading.Thread` subclass'ı                → Düz class. `run()` metodu `async def` oldu.
-    2. `time.sleep(sleep_time)`                      → `await asyncio.sleep(sleep_time)`
-    3. `self.context.stop_event.is_set()`            → `self.context.stop_event.is_set()` (aynı API, asyncio.Event)
-    4. `self.context.raw_data_queue.put(packet)`     → `await self.context.raw_data_queue.put(packet)`
-    5. `self.context.signal_bus.alarm_triggered...`  → `await self.context.broadcaster.publish("ALARM_TRIGGERED", ...)`
-    6. `self.context.signal_bus.sensor_data_ready...`→ `await self.context.broadcaster.publish("SENSOR_DATA", ...)`
-    7. Seri port okuma (blocking `readline`)         → `loop.run_in_executor(None, ...)` ile thread pool'da
+Mock tamamen kaldırıldı. Artık:
+    - ModbusRTUClient ile 30001–30005 arası 5 Input Register okunur.
+    - Ham değerler RegisterDef.scale() ile fiziksel birimlere çevrilir.
+    - status_word içindeki StatusBits kontrol edilir, alarm üretilir.
+    - SensorPacket oluşturulup raw_data_queue ve broadcaster'a gönderilir.
 
 Mimari Kural:
     - Bu katman Controller'a doğrudan DOKUNMAZ.
     - Veri yalnızca context.raw_data_queue'ya bırakılır.
     - UI bildirimi yalnızca context.broadcaster.publish() ile yapılır.
-
-Not (Mock):
-    AppContext üzerindeki `get_mock_position()` ve `set_mock_current()` metodları
-    gerçek donanım geldiğinde kaldırılacak. Tüm fizik simülasyonu bu sınıfta kalmaya devam eder.
+    - Modbus bağlantısı yalnızca bu sınıf tarafından yönetilir
+      (HALWriter kendi bağlantısını ayrıca kurar — iki ayrı istemci,
+       pymodbus async client thread-safe değildir).
 """
 
 from __future__ import annotations
@@ -27,10 +24,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from core.data_types import SensorPacket, AlarmCode
-from hal.serial_port_manager import AsyncSerialPortManager
+from hal.modbus_client import ModbusRTUClient
+from hal.modbus_config import Reg, StatusBits
 
 if TYPE_CHECKING:
     from core.app_context import AppContext
@@ -40,7 +38,8 @@ logger = logging.getLogger(__name__)
 
 class HALReader:
     """
-    [HAL Layer] Donanımdan SADECE sensör verilerini okur ve `raw_data_queue`'ya bırakır.
+    [HAL Layer] Modbus RTU Input Register'larını polling eder,
+    parse eder ve sisteme yayınlar.
 
     Kullanım (main.py içinde):
         reader = HALReader(context)
@@ -50,28 +49,30 @@ class HALReader:
     def __init__(self, context: "AppContext") -> None:
         self.context = context
 
-        hw_config = self.context.config.hardware
-        self.port_name: str = hw_config.get("port", "COM1")
-        self.baud_rate: int = hw_config.get("baud_rate", 115200)
+        hw = self.context.config.hardware
+        self._port:      str   = hw.get("port",           "COM1")
+        self._baudrate:  int   = hw.get("baud_rate",      115200)
+        self._slave_id:  int   = hw.get("slave_id",       1)
+        self._timeout:   float = hw.get("modbus_timeout", 0.1)
 
-        rate = hw_config.get("sample_rate_hz", 100)
+        rate = hw.get("sample_rate_hz", 50)
         if rate <= 0:
-            logger.warning(f"Geçersiz sample_rate_hz: {rate}, varsayılan 100Hz kullanılıyor.")
-            self.sample_rate_hz = 100
-        else:
-            self.sample_rate_hz = rate
+            logger.warning(f"Geçersiz sample_rate_hz={rate}, varsayılan 50 Hz kullanılıyor.")
+            rate = 50
+        self._sample_rate_hz: int   = rate
+        self._loop_delay:     float = 1.0 / self._sample_rate_hz
 
-        self._loop_delay: float = 1.0 / self.sample_rate_hz
-
-        # Mock sabitleri
-        self._mock_p1: float = 50.0
-        self._mock_temp: float = 298.15
-
-        self._is_connected: bool = False
+        self._max_reconnect: int = hw.get("max_reconnect_attempts", 5)
         self._reconnect_attempts: int = 0
-        self._max_reconnect_attempts: int = 5
 
-        self.serial_manager = AsyncSerialPortManager()
+        # Her polling döngüsünde aynı (address, count) kullanılır — bir kez hesapla.
+        self._read_addr, self._read_count = Reg.INPUT.block()  # (0, 5)
+
+        self._client: Optional[ModbusRTUClient] = None
+
+        # Ardışık okuma hatası sayacı — geçici gürültüyü alarm'dan ayırt eder.
+        self._consecutive_errors: int = 0
+        self._max_consecutive_errors: int = hw.get("max_consecutive_errors", 10)
 
     # ------------------------------------------------------------------
     # Ana Döngü
@@ -82,27 +83,26 @@ class HALReader:
         asyncio.Task olarak çalışan ana okuma döngüsü.
         stop_event set edildiğinde döngüden çıkar ve bağlantıyı kapatır.
         """
-        connected = await self._connect_to_hardware()
+        connected = await self._connect()
         if not connected:
-            await self.context.broadcaster.publish(
-                "ALARM_TRIGGERED",
-                {"code": int(AlarmCode.COMMUNICATION_LOST), "reason": "HALReader başlangıç bağlantısı başarısız."}
+            await self._publish_alarm(
+                AlarmCode.COMMUNICATION_LOST,
+                f"HALReader başlangıç bağlantısı başarısız: {self._port}"
             )
             return
 
-        logger.info(f"HALReader {self.sample_rate_hz}Hz hızında başlatıldı. Port: {self.port_name}")
+        logger.info(
+            f"HALReader başlatıldı — {self._sample_rate_hz} Hz, "
+            f"port={self._port}, slave={self._slave_id}"
+        )
 
         while not self.context.stop_event.is_set():
             loop_start = time.monotonic()
 
             try:
-                await self._read_incoming_sensors()
+                await self._poll_registers()
             except Exception as e:
-                logger.error(f"Okuma döngüsünde hata: {e}", exc_info=True)
-                await self.context.broadcaster.publish(
-                    "ALARM_TRIGGERED",
-                    {"code": int(AlarmCode.COMMUNICATION_LOST), "reason": str(e)}
-                )
+                logger.error(f"HALReader polling döngüsünde beklenmeyen hata: {e}", exc_info=True)
                 recovered = await self._handle_connection_loss()
                 if not recovered:
                     break
@@ -110,129 +110,209 @@ class HALReader:
             elapsed = time.monotonic() - loop_start
             sleep_time = max(0.0, self._loop_delay - elapsed)
             if sleep_time > 0:
-                await asyncio.sleep(sleep_time)  # ← blocking time.sleep() KALDIRILDI
+                await asyncio.sleep(sleep_time)
 
-        await self._disconnect_from_hardware()
+        await self._disconnect()
         logger.info("HALReader güvenli şekilde sonlandırıldı.")
 
     # ------------------------------------------------------------------
     # Bağlantı Yönetimi
     # ------------------------------------------------------------------
 
-    async def _connect_to_hardware(self) -> bool:
+    async def _connect(self) -> bool:
         """
-        Retry mekanizmalı donanım bağlantısı.
-        Blocking `serial.Serial()` çağrısı run_in_executor ile thread pool'a gönderilir.
-
-        Returns:
-            bool: Bağlantı başarılıysa True, tüm denemeler tükendiyse False.
+        Yeni bir ModbusRTUClient oluşturur ve bağlantıyı dener.
+        Her deneme arasında 2 saniye bekler.
         """
-        loop = asyncio.get_running_loop()
-        retry_count = 0
+        for attempt in range(1, self._max_reconnect + 1):
+            if self.context.stop_event.is_set():
+                return False
 
-        while not self.context.stop_event.is_set() and retry_count < self._max_reconnect_attempts:
-            try:
-                # Blocking I/O → executor'a taşındı
-                await loop.run_in_executor(
-                    None,
-                    self.serial_manager.open,
-                    self.port_name,
-                    self.baud_rate
-                )
-                self._is_connected = True
+            self._client = ModbusRTUClient(
+                port=self._port,
+                baudrate=self._baudrate,
+                timeout=self._timeout,
+                slave_id=self._slave_id,
+            )
+            success = await self._client.connect()
+            if success:
                 self._reconnect_attempts = 0
-                logger.info(f"Donanıma bağlandı: {self.port_name}")
+                self._consecutive_errors = 0
                 return True
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"Bağlantı hatası ({retry_count}/{self._max_reconnect_attempts}): {e}")
-                await asyncio.sleep(2.0)  # ← blocking time.sleep() değil
 
-        logger.critical(f"Donanıma bağlanılamadı: {self.port_name}")
+            logger.warning(
+                f"HALReader bağlantı denemesi {attempt}/{self._max_reconnect} başarısız."
+            )
+            await asyncio.sleep(2.0)
+
+        logger.critical(f"HALReader: {self._max_reconnect} denemede bağlanılamadı.")
         return False
 
     async def _handle_connection_loss(self) -> bool:
         """
-        Bağlantı kaybı durumunda kademeli retry.
-
-        Returns:
-            bool: Yeniden bağlantı başarılıysa True, maksimum deneme aşıldıysa False.
+        Bağlantı kaybında kademeli yeniden bağlanma.
+        Maksimum deneme aşılırsa sistemi kapatır.
         """
-        self._is_connected = False
         self._reconnect_attempts += 1
 
-        if self._reconnect_attempts >= self._max_reconnect_attempts:
+        if self._reconnect_attempts >= self._max_reconnect:
             logger.critical(
-                f"Maksimum yeniden bağlanma denemesi ({self._max_reconnect_attempts}) aşıldı. "
+                f"HALReader: Maksimum yeniden bağlanma ({self._max_reconnect}) aşıldı. "
                 "Sistem kapatılıyor."
             )
             await self.context.request_shutdown()
             return False
 
         logger.warning(
-            f"Bağlantı koptu. Yeniden bağlanılıyor... "
-            f"({self._reconnect_attempts}/{self._max_reconnect_attempts})"
+            f"HALReader bağlantısı koptu — "
+            f"yeniden bağlanılıyor ({self._reconnect_attempts}/{self._max_reconnect})..."
         )
-        return await self._connect_to_hardware()
 
-    async def _disconnect_from_hardware(self) -> None:
-        """Donanım bağlantısını kapatır."""
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self.serial_manager.close)
-        self._is_connected = False
-        logger.info("Donanım bağlantısı kapatıldı.")
+        if self._client:
+            await self._client.disconnect()
+
+        return await self._connect()
+
+    async def _disconnect(self) -> None:
+        """Modbus bağlantısını güvenle kapatır."""
+        if self._client:
+            await self._client.disconnect()
+            self._client = None
 
     # ------------------------------------------------------------------
-    # Sensör Okuma
+    # Register Polling ve Parse
     # ------------------------------------------------------------------
 
-    async def _read_incoming_sensors(self) -> None:
+    async def _poll_registers(self) -> None:
         """
-        Sensörlerden veri okur, parse eder ve sisteme yayınlar.
+        5 Input Register'ı tek Modbus isteğiyle okur, parse eder ve yayınlar.
 
-        Gerçek donanımda:
-            raw_bytes = await loop.run_in_executor(None, self.serial_manager.readline)
-            packet = self._parser.parse_raw(raw_bytes)
-
-        Şu an mock verisi üretilmektedir.
+        Hata durumları:
+            - None dönerse → ardışık hata sayacı artar.
+            - Sayaç eşiği aşarsa → COMMUNICATION_LOST alarmı tetiklenir.
+            - Eşik aşılmamışsa → paket üretilmez, döngü devam eder.
         """
-        if not self._is_connected:
+        if not self._client or not self._client.is_connected:
+            raise ConnectionError("Modbus istemcisi bağlı değil.")
+
+        raw = await self._client.read_input_registers(
+            address=self._read_addr,
+            count=self._read_count,
+        )
+
+        # None → okuma başarısız
+        if raw is None:
+            self._consecutive_errors += 1
+            logger.warning(
+                f"Input Register okunamadı "
+                f"({self._consecutive_errors}/{self._max_consecutive_errors} ardışık hata)"
+            )
+
+            if self._consecutive_errors >= self._max_consecutive_errors:
+                await self._publish_alarm(
+                    AlarmCode.COMMUNICATION_LOST,
+                    f"{self._consecutive_errors} ardışık Modbus okuma hatası."
+                )
+                raise ConnectionError("Ardışık Modbus okuma hatası eşiği aşıldı.")
             return
 
-        # --- Mock Fizik ---
-        current_pos = self.context.get_mock_position()
-        max_tick = self.context.config.hardware.get("max_tick", 1000)
-        opening_ratio = min(max(current_pos / max_tick, 0.0), 1.0)
+        # Başarılı okuma — hata sayacını sıfırla
+        self._consecutive_errors = 0
 
-        mock_p2 = self._update_mock_p2(opening_ratio)
-        mock_current = self._update_mock_current(opening_ratio)
+        # Register listesi beklenen boyutta mı?
+        if len(raw) < self._read_count:
+            logger.error(
+                f"Eksik register verisi: beklenen={self._read_count}, gelen={len(raw)}"
+            )
+            return
 
-        # Tutarlılık için mock akımı context'e yaz
-        self.context.set_mock_current(mock_current)
+        packet = self._parse(raw)
+        if packet is None:
+            return
 
-        packet = SensorPacket(
-            p1_raw=self._mock_p1,
-            p2_raw=mock_p2,
-            temp_k=self._mock_temp,
-            motor_pos_ticks=current_pos,
-            motor_current_ma=mock_current,
-            timestamp=time.monotonic()
-        )
-
-        # Controller için kuyruğa at (non-blocking put)
+        # Controller kuyruğuna (non-blocking)
         await self.context.raw_data_queue.put(packet)
 
-        # UI için WebSocket üzerinden yayınla (signal_bus.sensor_data_ready → broadcaster)
+        # WebSocket üzerinden UI'a
         await self.context.broadcaster.publish("SENSOR_DATA", packet)
 
+    def _parse(self, raw: list[int]) -> Optional[SensorPacket]:
+        """
+        Ham UInt16 register listesini SensorPacket'e çevirir.
+
+        Register sırası (Reg.INPUT.block() → address=0, count=5):
+            raw[0] → 30001  status_word          (bit bazlı, scaling=1)
+            raw[1] → 30002  current_position_rev (tur,       scaling=1)
+            raw[2] → 30003  current_position_step(adım,      scaling=1)
+            raw[3] → 30004  external_signal_ma   (mA×100,    scaling=100)
+            raw[4] → 30005  motor_torque_pct     (%,         scaling=1)
+
+        SensorPacket alanlarına eşleme:
+            motor_pos_ticks  ← tur * step_resolution + step (encoder tick karşılığı)
+            motor_current_ma ← external_signal_ma (dış sinyal mA olarak)
+            p1_raw / p2_raw  ← Bu register haritasında YOK.
+                               Basınç sensörleri farklı bir slave veya analog
+                               giriş üzerindeyse ileride genişletilebilir.
+                               Şimdilik 0.0 bırakılır.
+        """
+        r = Reg.INPUT  # Kısaltma
+
+        status_word:  int   = raw[r.STATUS_WORD.address]
+        pos_rev:      int   = raw[r.CURRENT_POSITION_REV.address]
+        pos_step:     int   = raw[r.CURRENT_POSITION_STEP.address]
+        signal_raw:   int   = raw[r.EXTERNAL_SIGNAL_MA.address]
+        torque_raw:   int   = raw[r.MOTOR_TORQUE_PCT.address]
+
+        # Ölçekleme
+        signal_ma:  float = r.EXTERNAL_SIGNAL_MA.scale(signal_raw)   # 1200 → 12.00
+        torque_pct: float = r.MOTOR_TORQUE_PCT.scale(torque_raw)      # 75 → 75.0
+
+        # Status Word bit kontrolü — alarmlar asenkron olarak üretilir.
+        self._check_status_bits(status_word)
+
+        # Tick hesabı: AppContext'teki step_resolution ayarına göre normalize.
+        step_resolution: int = self.context.config.hardware.get("step_resolution", 1000)
+        motor_pos_ticks: int = pos_rev * step_resolution + pos_step
+
+        return SensorPacket(
+            p1_raw=0.0,              # Basınç sensörü bu haritada tanımlı değil
+            p2_raw=0.0,              # Genişletme gerekirse buraya eklenecek
+            temp_k=0.0,              # Sıcaklık sensörü bu haritada tanımlı değil
+            motor_pos_ticks=motor_pos_ticks,
+            motor_current_ma=signal_ma,
+            timestamp=time.monotonic(),
+        )
+
+    def _check_status_bits(self, status_word: int) -> None:
+        """
+        Durum kelimesinin bit'lerini kontrol eder.
+        İlgili alarm koşulu varsa broadcaster'a asenkron görev olarak gönderir.
+
+        asyncio.create_task kullanılır — _parse() senkron bir metot olduğundan
+        doğrudan await yapılamaz.
+        """
+        if status_word & StatusBits.SIGNAL_ERROR:
+            asyncio.create_task(
+                self._publish_alarm(
+                    AlarmCode.SENSOR_OUT_OF_RANGE,
+                    "Donanım sinyal hatası bildirdi (status_word Bit2)."
+                )
+            )
+
+        if status_word & StatusBits.MOVING:
+            logger.debug("Durum: Vana hareket halinde (status_word Bit1).")
+
+        if status_word & StatusBits.CALIBRATION_DONE:
+            logger.debug("Durum: Kalibrasyon tamamlandı (status_word Bit0).")
+
     # ------------------------------------------------------------------
-    # Mock Yardımcılar (Gerçek donanımda kaldırılacak)
+    # Yardımcı
     # ------------------------------------------------------------------
 
-    def _update_mock_p2(self, opening_ratio: float) -> float:
-        """Valf açıldıkça downstream basıncı DÜŞER. (P2: 40 bar → 28 bar)"""
-        return 40.0 - (opening_ratio * 12.0)
-
-    def _update_mock_current(self, opening_ratio: float) -> float:
-        """Hareket halinde akım artar, %50 açıklıkta zirve yapar."""
-        return 12.0 + abs(opening_ratio - 0.5) * 25.0
+    async def _publish_alarm(self, code: AlarmCode, reason: str) -> None:
+        """Alarm olayını WebSocket broadcaster üzerinden yayınlar."""
+        logger.error(f"ALARM [{code.name}]: {reason}")
+        await self.context.broadcaster.publish(
+            "ALARM_TRIGGERED",
+            {"code": int(code), "reason": reason},
+        )

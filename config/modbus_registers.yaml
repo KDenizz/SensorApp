@@ -1,0 +1,214 @@
+# =============================================================================
+# Modbus RTU Register Haritası — Servo Vana Kontrol Kartı
+# =============================================================================
+#
+# Adres Sistemi:
+#   Bu dosyadaki tüm adresler 0-tabanlı pymodbus adresleridir.
+#   Modbus konvansiyonu → pymodbus dönüşümü:
+#     Holding (4x):  40001 → 0,  40002 → 1,  40010 → 9,  vb.
+#     Input   (3x):  30001 → 0,  30002 → 1,  vb.
+#
+# Alan Açıklamaları:
+#   address  : 0-tabanlı pymodbus adresi
+#   type     : Veri tipi (uint16)
+#   access   : "rw" = okunabilir+yazılabilir (Holding), "ro" = salt okunur (Input)
+#   scaling  : Ham değer bu sayıya bölünerek fiziksel değere çevrilir.
+#              1 = ölçekleme yok. Örn: 1200 / 100 = 12.00 mA
+#   description: Parametrenin açıklaması
+#   mode     : İlgili servo çalışma modu(ları)
+#
+# =============================================================================
+
+holding_registers:
+  # ---------------------------------------------------------------------------
+  # BLOK 1: Kontrol (Adres 0–3 | Modbus 40001–40004)
+  # Yüksek öncelikli — sık yazılan komut ve hedef registerları.
+  # ---------------------------------------------------------------------------
+
+  mode_select:
+    address: 0          # 40001
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Aktif çalışma modunu seçer (1=Mod1 ... 6=Mod6)"
+    mode: "Tüm Modlar"
+
+  control_word:
+    address: 1          # 40002
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "0=Dur, 1=Auto-Calibration Başlat, 2=Tam Aç (TTL), 3=Tam Kapat (TTL)"
+    mode: "Mod 01, Mod 04"
+
+  target_revolutions:
+    address: 2          # 40003
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Dijital Adım modunda hedef tur sayısı"
+    mode: "Mod 03"
+
+  target_step:
+    address: 3          # 40004
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Dijital Adım modunda hedef adım/derece (örn: 45)"
+    mode: "Mod 03"
+
+  # Adres 4–8 (40005–40009): Tabloda tanımlanmamış, rezerve edilmiş.
+
+  # ---------------------------------------------------------------------------
+  # BLOK 2: Genel Kurulum (Adres 9–10 | Modbus 40010–40011)
+  # ---------------------------------------------------------------------------
+
+  max_revolutions:
+    address: 9          # 40010
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Tam açılma için gereken toplam tur sayısı (örn: 1–40)"
+    mode: "Genel Kurulum"
+
+  calibration_direction:
+    address: 10         # 40011
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Kalibrasyon dönüş yönü: 0=CW (Saat Yönü), 1=CCW (Ters)"
+    mode: "Mod 01"
+
+  # ---------------------------------------------------------------------------
+  # BLOK 3: Kalibrasyon & Sinyal Parametreleri (Adres 11–13 | Modbus 40012–40014)
+  # ---------------------------------------------------------------------------
+
+  zero_torque_threshold:
+    address: 11         # 40012
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "'0' referans noktasını kaydetmek için aşılması gereken tork/akım eşiği (%)"
+    mode: "Mod 01"
+
+  proportional_signal_min:
+    address: 12         # 40013
+    type: "uint16"
+    access: "rw"
+    scaling: 100        # Ham: 400 → Fiziksel: 4.00 mA
+    description: "Oransal modülasyon alt sınırı (Örn: 400 = 4.00 mA)"
+    mode: "Mod 02"
+
+  proportional_signal_max:
+    address: 13         # 40014
+    type: "uint16"
+    access: "rw"
+    scaling: 100        # Ham: 2000 → Fiziksel: 20.00 mA
+    description: "Oransal modülasyon üst sınırı (Örn: 2000 = 20.00 mA)"
+    mode: "Mod 02"
+
+  # ---------------------------------------------------------------------------
+  # BLOK 4: Gelişmiş Kontrol Parametreleri (Adres 14–19 | Modbus 40015–40020)
+  # ---------------------------------------------------------------------------
+
+  step_resolution:
+    address: 14         # 40015
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "1 turun kaç adıma/dereceye bölündüğü — PPR (örn: 1000)"
+    mode: "Mod 03"
+
+  signal_loss_action:
+    address: 15         # 40016
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Sinyal koptuğunda: 0=Olduğu yerde kal, 1=Tam kapat, 2=X konumuna git"
+    mode: "Mod 05"
+
+  signal_loss_target_rev:
+    address: 16         # 40017
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Sinyal kaybı Aksiyon 2 seçildiğinde gidilecek tur konumu"
+    mode: "Mod 05"
+
+  signal_loss_target_step:
+    address: 17         # 40018
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Sinyal kaybı Aksiyon 2 seçildiğinde gidilecek adım/derece konumu"
+    mode: "Mod 05"
+
+  closing_torque_limit:
+    address: 18         # 40019
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Kapanışta iğnenin yatağa zarar vermemesi için son aşamada uygulanan tork sınırı (%)"
+    mode: "Mod 06"
+
+  opening_kick_torque:
+    address: 19         # 40020
+    type: "uint16"
+    access: "rw"
+    scaling: 1
+    description: "Sticking etkisini yenmek için açılışta kısa süreli kalkış torku (%, örn: 100)"
+    mode: "Mod 06"
+
+
+# =============================================================================
+# Input Registers (3x) — Salt Okunur Telemetri
+# Function Code 04 ile okunur. HALReader her polling döngüsünde bu 5 register'ı okur.
+# Tek seferde okunması için: address=0, count=5
+# =============================================================================
+
+input_registers:
+
+  status_word:
+    address: 0          # 30001
+    type: "uint16"
+    access: "ro"
+    scaling: 1
+    description: >
+      Bit bazlı durum kelimesi:
+        Bit 0 = Kalibrasyon Tamamlandı
+        Bit 1 = Hareket Halinde
+        Bit 2 = Sinyal Hatası
+        Bit 3–15 = Rezerve
+    mode: "İzleme"
+
+  current_position_rev:
+    address: 1          # 30002
+    type: "uint16"
+    access: "ro"
+    scaling: 1
+    description: "Vananın anlık tam tur sayısı"
+    mode: "İzleme"
+
+  current_position_step:
+    address: 2          # 30003
+    type: "uint16"
+    access: "ro"
+    scaling: 1
+    description: "Vananın mevcut tur içindeki anlık adım/derece pozisyonu"
+    mode: "İzleme"
+
+  external_signal_ma:
+    address: 3          # 30004
+    type: "uint16"
+    access: "ro"
+    scaling: 100        # Ham: 1200 → Fiziksel: 12.00 mA
+    description: "Analog girişten okunan anlık akım (Örn: ham 1200 = 12.00 mA)"
+    mode: "İzleme"
+
+  motor_torque_pct:
+    address: 4          # 30005
+    type: "uint16"
+    access: "ro"
+    scaling: 1
+    description: "Motorun anlık tork/akım yükü yüzdesi (%)"
+    mode: "İzleme"
