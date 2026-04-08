@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from multiprocessing import context
 import signal
 import sys
 from typing import List
@@ -38,6 +39,8 @@ from hal.hal_writer import HALWriter
 from hal.data_logger import DataLogger
 from controller.main_controller import MainController
 from server.ws_server import create_app
+from hal.modbus_config import Reg  
+from hal.modbus_client import ModbusRTUClient
 
 # Logging yapılandırması
 logging.basicConfig(
@@ -64,22 +67,14 @@ async def main() -> None:
     # AppContext'e ekliyoruz (AppContext'e alan eklemek yerine lazy init)
     context.event_queue: asyncio.Queue = asyncio.Queue()
 
-    # Mock state yönetimi (gerçek donanımda kaldırılacak)
-    context._mock_position: int = 0
-    context._mock_current: float = 12.0
+        # 2. Register Haritasını Yükle  ← YENİ BLOK
+    # HALReader ve HALWriter oluşturulmadan ÖNCE çağrılmalıdır.
+    # Reg.INPUT ve Reg.HOLDING bu satırdan sonra kullanılabilir.
+    # ------------------------------------------------------------------
+    Reg.load()
+    logger.info("Modbus register haritası yüklendi.")
 
-    def get_mock_position() -> int:
-        return context._mock_position
 
-    def set_mock_position(pos: int) -> None:
-        context._mock_position = pos
-
-    def set_mock_current(current: float) -> None:
-        context._mock_current = current
-
-    context.get_mock_position = get_mock_position
-    context.set_mock_position = set_mock_position
-    context.set_mock_current = set_mock_current
 
     # ------------------------------------------------------------------
     # 2. SerialPortManager Async Başlatma
@@ -91,6 +86,20 @@ async def main() -> None:
     # 3. FastAPI Uygulaması
     # ------------------------------------------------------------------
     app = create_app(context)
+    hw = context.config.hardware
+    shared_modbus = ModbusRTUClient(
+        port=hw.get("port", "COM7"),
+        baudrate=hw.get("baud_rate", 115200),
+        timeout=hw.get("modbus_timeout", 0.1),
+        slave_id=hw.get("slave_id", 1),
+    )
+    connected = await shared_modbus.connect()
+    if not connected:
+        logger.critical("Modbus bağlantısı kurulamadı, sistem başlatılamıyor.")
+        return
+
+    context.modbus_client = shared_modbus
+
 
     # ------------------------------------------------------------------
     # 4. Async Task'ları Başlat

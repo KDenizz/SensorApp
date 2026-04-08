@@ -68,7 +68,7 @@ class HALReader:
         # Her polling döngüsünde aynı (address, count) kullanılır — bir kez hesapla.
         self._read_addr, self._read_count = Reg.INPUT.block()  # (0, 5)
 
-        self._client: Optional[ModbusRTUClient] = None
+        self._client: ModbusRTUClient = context.modbus_client
 
         # Ardışık okuma hatası sayacı — geçici gürültüyü alarm'dan ayırt eder.
         self._consecutive_errors: int = 0
@@ -118,12 +118,13 @@ class HALReader:
     # ------------------------------------------------------------------
     # Bağlantı Yönetimi
     # ------------------------------------------------------------------
-
+    
+    
+    """
     async def _connect(self) -> bool:
-        """
-        Yeni bir ModbusRTUClient oluşturur ve bağlantıyı dener.
-        Her deneme arasında 2 saniye bekler.
-        """
+       
+        #Yeni bir ModbusRTUClient oluşturur ve bağlantıyı dener. Her deneme arasında 2 saniye bekler.
+        
         for attempt in range(1, self._max_reconnect + 1):
             if self.context.stop_event.is_set():
                 return False
@@ -147,6 +148,8 @@ class HALReader:
 
         logger.critical(f"HALReader: {self._max_reconnect} denemede bağlanılamadı.")
         return False
+    """
+
 
     async def _handle_connection_loss(self) -> bool:
         """
@@ -172,12 +175,16 @@ class HALReader:
             await self._client.disconnect()
 
         return await self._connect()
+    
 
+    """
     async def _disconnect(self) -> None:
-        """Modbus bağlantısını güvenle kapatır."""
+        # Modbus bağlantısını güvenle kapatır.
         if self._client:
             await self._client.disconnect()
             self._client = None
+    """
+
 
     # ------------------------------------------------------------------
     # Register Polling ve Parse
@@ -275,8 +282,8 @@ class HALReader:
         motor_pos_ticks: int = pos_rev * step_resolution + pos_step
 
         return SensorPacket(
-            p1_raw=0.0,              # Basınç sensörü bu haritada tanımlı değil
-            p2_raw=0.0,              # Genişletme gerekirse buraya eklenecek
+            p1_raw=r.PRESSURE_INLET_BAR.scale(raw[r.PRESSURE_INLET_BAR.address]), # Basınç sensörü bu haritada tanımlı değil, geçici eklendi sim. için
+            p2_raw=r.PRESSURE_OUTLET_BAR.scale(raw[r.PRESSURE_OUTLET_BAR.address]), # Genişletme gerekirse buraya eklenecek, geçici eklendi sim. için
             temp_k=0.0,              # Sıcaklık sensörü bu haritada tanımlı değil
             motor_pos_ticks=motor_pos_ticks,
             motor_current_ma=signal_ma,

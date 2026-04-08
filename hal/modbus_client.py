@@ -162,7 +162,7 @@ class ModbusRTUClient:
                 response = await self._client.read_input_registers(
                     address=address,
                     count=count,
-                    slave=self.slave_id,
+                    device_id=self.slave_id,
                 )
 
                 if _is_error_response(response):
@@ -198,7 +198,7 @@ class ModbusRTUClient:
                 response = await self._client.read_holding_registers(
                     address=address,
                     count=count,
-                    slave=self.slave_id,
+                    device_id=self.slave_id,
                 )
 
                 if _is_error_response(response):
@@ -235,7 +235,7 @@ class ModbusRTUClient:
                 response = await self._client.write_register(
                     address=address,
                     value=value,
-                    slave=self.slave_id,
+                    device_id=self.slave_id,
                 )
 
                 if _is_error_response(response):
@@ -275,7 +275,7 @@ class ModbusRTUClient:
                 response = await self._client.write_registers(
                     address=address,
                     values=values,
-                    slave=self.slave_id,
+                    device_id=self.slave_id,
                 )
 
                 if _is_error_response(response):

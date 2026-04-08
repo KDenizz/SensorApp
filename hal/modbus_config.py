@@ -153,6 +153,10 @@ class InputRegisters:
         self.CURRENT_POSITION_STEP: RegisterDef = regs["current_position_step"]
         self.EXTERNAL_SIGNAL_MA:   RegisterDef = regs["external_signal_ma"]
         self.MOTOR_TORQUE_PCT:     RegisterDef = regs["motor_torque_pct"]
+        # GEÇİCİ: Basınç sensörü register adresleri
+        self.PRESSURE_INLET_BAR:  RegisterDef = regs["pressure_inlet_bar"]
+        self.PRESSURE_OUTLET_BAR: RegisterDef = regs["pressure_outlet_bar"]
+
 
     def block(self) -> Tuple[int, int]:
         """

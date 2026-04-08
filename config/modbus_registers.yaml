@@ -212,3 +212,23 @@ input_registers:
     scaling: 1
     description: "Motorun anlık tork/akım yükü yüzdesi (%)"
     mode: "İzleme"
+
+    # --- GEÇİCİ: Basınç sensörü register adresleri ---
+  # NOT: Bu adresler gerçek donanım haritasında tanımlı değildir.
+  # Simülasyon testleri için eklenmiştir. Gerçek adresler
+  # donanım geldiğinde güncellenecektir.
+  pressure_inlet_bar:
+    address: 5          # 30006 — GEÇİCİ
+    type: "uint16"
+    access: "ro"
+    scaling: 100        # Ham: 1000 → Fiziksel: 10.00 bar
+    description: "GEÇİCİ — Giriş basıncı (bar × 100)"
+    mode: "İzleme"
+
+  pressure_outlet_bar:
+    address: 6          # 30007 — GEÇİCİ
+    type: "uint16"
+    access: "ro"
+    scaling: 100        # Ham: 800 → Fiziksel: 8.00 bar
+    description: "GEÇİCİ — Çıkış basıncı (bar × 100)"
+    mode: "İzleme"

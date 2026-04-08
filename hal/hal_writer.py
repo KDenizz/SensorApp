@@ -64,7 +64,7 @@ class HALWriter:
         self.context = context
 
         hw = self.context.config.hardware
-        self._port:     str   = hw.get("port",           "COM1")
+        self._port:     str   = hw.get("port",           "COM7") # <--- Port numarasını COM7 olarak ayarladık
         self._baudrate: int   = hw.get("baud_rate",      115200)
         self._slave_id: int   = hw.get("slave_id",       1)
         self._timeout:  float = hw.get("modbus_timeout", 0.1)
@@ -72,7 +72,7 @@ class HALWriter:
         self._max_reconnect: int = hw.get("max_reconnect_attempts", 5)
         self._reconnect_attempts: int = 0
 
-        self._client: Optional[ModbusRTUClient] = None
+        self._client: ModbusRTUClient = context.modbus_client 
 
     # ------------------------------------------------------------------
     # Ana Döngü
@@ -138,12 +138,12 @@ class HALWriter:
     # ------------------------------------------------------------------
     # Bağlantı Yönetimi
     # ------------------------------------------------------------------
-
+    """
     async def _connect(self) -> bool:
-        """
-        Yeni bir ModbusRTUClient oluşturur ve bağlantı kurar.
-        Her deneme arasında 2 saniye bekler.
-        """
+        
+        # Yeni bir ModbusRTUClient oluşturur ve bağlantı kurar.
+        # Her deneme arasında 2 saniye bekler.
+        
         for attempt in range(1, self._max_reconnect + 1):
             if self.context.stop_event.is_set():
                 return False
@@ -166,7 +166,7 @@ class HALWriter:
 
         logger.critical(f"HALWriter: {self._max_reconnect} denemede bağlanılamadı.")
         return False
-
+    """
     async def _handle_connection_loss(self) -> bool:
         """
         Bağlantı kaybında kademeli yeniden bağlanma.
@@ -192,12 +192,14 @@ class HALWriter:
 
         return await self._connect()
 
+    """
     async def _disconnect(self) -> None:
-        """Modbus bağlantısını güvenle kapatır."""
+        # Modbus bağlantısını güvenle kapatır.
         if self._client:
             await self._client.disconnect()
             self._client = None
-
+    """
+    
     # ------------------------------------------------------------------
     # Komut → Register Dönüşümü
     # ------------------------------------------------------------------

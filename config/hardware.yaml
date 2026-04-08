@@ -18,7 +18,7 @@
 # Seri port adresi.
 #   Windows : "COM3", "COM4", vb.
 #   Linux   : "/dev/ttyUSB0", "/dev/ttyS0", vb.
-port: "COM3"
+port: "COM7"
 
 # Haberleşme hızı (bps). Slave cihazla eşleşmeli.
 baud_rate: 115200
