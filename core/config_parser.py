@@ -127,3 +127,27 @@ class ConfigParser:
         """Veriye erişilmeden önce load_all metodunun çağrıldığını doğrular."""
         if not self._is_loaded:
             raise ConfigError("Konfigürasyonlar yüklenmeden erişim sağlanamaz. Önce load_all() çağrılmalı.")
+
+        # Donanım ayarlarını güncelle
+    def save_hardware(self, new_config: Dict[str, Any]) -> None:
+        """
+        hardware.yaml dosyasını atomik olarak günceller.
+        Önce geçici dosyaya yazar, sonra rename eder — yarım yazma riski yoktur.
+        
+        Args:
+            new_config: Yeni donanım ayarları sözlüğü.
+        """
+        hw_path = self._root_path / "hardware.yaml"
+        tmp_path = self._root_path / "hardware.yaml.tmp"
+
+        try:
+            with tmp_path.open("w", encoding="utf-8") as f:
+                yaml.dump(new_config, f, allow_unicode=True, default_flow_style=False)
+            tmp_path.replace(hw_path)  # Atomik rename
+            self._hardware_config = new_config
+            import logging
+            logging.getLogger(__name__).info("hardware.yaml güncellendi ve belleğe yüklendi.")
+        except Exception as e:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise ConfigError(f"hardware.yaml yazılamadı: {e}") from e

@@ -26,6 +26,11 @@ class CommandType(Enum):
     CALIBRATE = auto()      # Kalibrasyon rutinini başlat
     MOVE_VELOCITY = auto()  # Hız ve yön tabanlı sürekli hareket
     STOP = auto()           # Durdurma
+    SET_TARGET_TURNS = auto()   # Mod 3: 40003 hedef tur yaz
+    SET_TARGET_STEP = auto()   # Mod 3: 40004 hedef adım yaz
+    OPEN_FULL        = auto()  # Tam Aç
+    CLOSE_FULL       = auto()  # Tam Kapat
+    SET_MODE         = auto()  # Mod seçimi 
 
 class ControlMode(Enum):
     """Aktif kontrol algoritmaları."""
@@ -55,10 +60,14 @@ class SensorPacket:
     p1_raw: float = 0.0           # Giriş Basıncı (bar) [cite: 1, 643]
     p2_raw: float = 0.0            # Çıkış Basıncı (bar) [cite: 3, 643]
     temp_k: float = 0.0            # Akışkan Sıcaklığı (Kelvin) [cite: 644, 645]
-    motor_pos_ticks: int = 0       # Encoder'dan okunan ham tick değeri [cite: 647]
-    motor_current_ma: float = 0.0   # Motordan okunan akım (mA) [cite: 502, 691]
+    motor_pos_ticks: int = 0       # Toplam tick (turns * PPR + steps)
+    motor_turns: int = 0           # 30002 — Mevcut tam tur sayısı
+    motor_steps: int = 0           # 30003 — Mevcut tur içi adım pozisyonu
+    motor_torque_pct: float = 0.0  # 30005 — Anlık tork yükü (%)
+    motor_current_ma: float = 0.0  # 30004 — Dış sinyal (mA)
+    calibration_status: int = 0    # addr=11 — 0: kalibre değil, 1: kalibre
     timestamp: float = 0.0          # Verinin alındığı sistem zamanı
-
+    
 @dataclass(frozen=True)
 class ComputedPacket:
     """Computation Layer tarafından işlenmiş fiziksel büyüklükler."""

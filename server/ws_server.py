@@ -46,7 +46,10 @@ def create_app(context: AppContext) -> FastAPI:
         try:
             while True:
                 raw_data = await websocket.receive_text()
-                await _handle_client_message(raw_data, context)
+                try:
+                    await _handle_client_message(raw_data, context)
+                except Exception as e:
+                    logger.error(f"WebSocket mesaj işleme hatası: {e}", exc_info=True)
 
         except WebSocketDisconnect:
             logger.info(f"Frontend bağlantısı kapandı: {client}")
@@ -101,15 +104,13 @@ async def _handle_client_message(raw_data: str, context: AppContext) -> None:
     elif cmd_type == "SET_MODE":
         mode = int(payload.get("mode", 1))
         if not (1 <= mode <= 6):
-            logger.warning(f"Geçersiz mod numarası: {mode}. 1–6 arasında olmalı.")
+            logger.warning(f"Geçersiz mod numarası: {mode}")
             return
-
         logger.info(f"Frontend: Mod seçimi → Mod {mode}")
         command = MotorCommand(
-            type=CommandType.MOVE_ABSOLUTE,  # HALWriter mod yazma için bunu kullanır
+            type=CommandType.SET_MODE,
             value=float(mode),
             priority=1,
-            metadata={"command_intent": "SET_MODE"},
         )
         await context.command_queue.put((1, command))
 
@@ -133,8 +134,7 @@ async def _handle_client_message(raw_data: str, context: AppContext) -> None:
     elif cmd_type == "OPEN_FULL":
         logger.info("Frontend: Tam Aç (TTL) komutu alındı.")
         command = MotorCommand(
-            type=CommandType.STOP,
-            direction=1,   # 1 → Aç
+            type=CommandType.OPEN_FULL,
             priority=1,
         )
         await context.command_queue.put((1, command))
@@ -147,8 +147,59 @@ async def _handle_client_message(raw_data: str, context: AppContext) -> None:
     elif cmd_type == "CLOSE_FULL":
         logger.info("Frontend: Tam Kapat (TTL) komutu alındı.")
         command = MotorCommand(
+            type=CommandType.CLOSE_FULL,
+            priority=1,        )
+        await context.command_queue.put((1, command))
+
+
+    elif cmd_type == "GOTO_POSITION":
+        turns = int(payload.get("turns", 0))
+        step  = int(payload.get("step", 0))
+        # Önce mod 3
+        logger.info(f"Frontend: GOTO_POSITION → {turns} tur, {step} adım")
+
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_MODE, value=3.0, priority=1
+        )))
+        # Sonra hedefler
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_TARGET_TURNS, value=float(turns), priority=1
+        )))
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_TARGET_STEP, value=float(step), priority=1
+        )))
+        
+    elif cmd_type == "STOP":
+        logger.info("Frontend: DURDURMA komutu alındı.")
+        command = MotorCommand(
             type=CommandType.STOP,
-            direction=-1,  # -1 → Kapat
+            priority=1,
+        )
+        await context.command_queue.put((1, command))
+
+
+    elif cmd_type == "SET_TARGET_TURNS":
+        target_turns = float(payload.get("turns", 0.0))
+        if target_turns < 0:
+                logger.warning(f"Geçersiz tur sayısı: {target_turns}")
+                return
+        logger.info(f"Frontend: Hedef Tur Sayısı → {target_turns} tur")
+        command = MotorCommand(
+                type=CommandType.SET_TARGET_TURNS,
+                value=float(target_turns),
+                priority=1,
+        )
+        await context.command_queue.put((1, command))
+
+    elif cmd_type == "SET_TARGET_STEP":
+        step = int(payload.get("step", 0))
+        if step < 0:
+            logger.warning(f"Geçersiz adım: {step}")
+            return
+        logger.info(f"Frontend: Hedef adım → {step}")
+        command = MotorCommand(
+            type=CommandType.SET_TARGET_STEP,
+            value=float(step),
             priority=1,
         )
         await context.command_queue.put((1, command))

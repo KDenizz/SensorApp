@@ -1,34 +1,24 @@
 """
-modbus_simulator.py
+modbus_simulator.py  —  Gerçekçi Modbus RTU Slave Simülatörü
+pymodbus 3.8+ uyumlu
 
-Gerçek donanım olmadan sistemi test etmek için Modbus RTU Slave simülatörü.
-pymodbus 3.8+ API'siyle uyumludur.
+Register Haritası (C# kodundan doğrulanmış):
+    WRITE (FC06):
+        addr=0  → mode_select         (0=dur, 1=kalibrasyon, 2=sinyal, 3=dijital adım, ...)
+        addr=1  → total_turns         (hedef toplam tur)
+        addr=2  → proportional_signal (0-1000)
+        addr=3  → target_step         (hedef adım)
+        addr=5  → fast_open_close     (0=kapat, 1=aç)
+        addr=8  → calibration_direction (0=eksi, 1=artı)
 
-Çalışma mantığı:
-    - COM4'te (veya başka bir portta) Modbus Slave olarak dinler.
-    - Backend COM3'ten Master olarak bağlanır — com0com ile COM3↔COM4 köprüsü kurulur.
-    - Input Register (3x) alanlarına periyodik sahte veri yazar.
-    - Holding Register (4x) yazma komutlarını kabul eder ve terminale basar.
-    - Pozisyon sinüs dalgasıyla yavaşça salınır — grafiklerde hareket görünür.
-
-Kurulum:
-    pip install pymodbus
-
-Kullanım:
-    python modbus_simulator.py                  # varsayılan COM4, slave_id=1
-    python modbus_simulator.py --port COM7      # farklı port
-    python modbus_simulator.py --port COM4 --slave-id 2
-
-com0com kurulumu (Windows):
-    https://sourceforge.net/projects/com0com/
-    COM3 <-> COM4 (veya COM6 <-> COM7 gibi) çifti oluştur.
-    Backend hardware.yaml → port: "COM3"   (veya COM6)
-    Bu simülatör  → port: "COM4"           (veya COM7)
+    READ (FC03):
+        addr=9  → current_position    (signed int16)
+        addr=10 → current_load        (signed int16)
+        addr=11 → calibration_status  (0=kalibre değil, 1=kalibre)
 """
 
 import argparse
 import logging
-import math
 import threading
 import time
 
@@ -48,121 +38,204 @@ logging.basicConfig(
 logger = logging.getLogger("simulator")
 
 # ---------------------------------------------------------------------------
-# Register Adresleri (0-tabanlı pymodbus)
-# modbus_registers.yaml ile eşleşmeli
+# Register Adresleri — Gerçek Donanım Haritası
 # ---------------------------------------------------------------------------
 
-# Input Registers (3x) — FC 04 ile okunur
-IR_STATUS_WORD        = 0   # 30001
-IR_CURRENT_POS_REV    = 1   # 30002
-IR_CURRENT_POS_STEP   = 2   # 30003
-IR_EXTERNAL_SIGNAL_MA = 3   # 30004  (ham: mA x 100, örn: 1200 = 12.00mA)
-IR_MOTOR_TORQUE_PCT   = 4   # 30005
-# GEÇİCİ: Basınç sensörü register adresleri
-IR_PRESSURE_INLET  = 5   # 30006 — GEÇİCİ
-IR_PRESSURE_OUTLET = 6   # 30007 — GEÇİCİ
+# Yazılabilir (FC06 Write) — Holding Register
+HR_MODE_SELECT          = 0
+HR_TOTAL_TURNS          = 1
+HR_PROPORTIONAL_SIGNAL  = 2
+HR_TARGET_STEP          = 3
+HR_FAST_OPEN_CLOSE      = 5
+HR_CALIBRATION_DIR      = 8
 
-# Holding Registers (4x) — FC 03/06/16 ile okunur/yazılır
-HR_MODE_SELECT        = 0   # 40001
-HR_CONTROL_WORD       = 1   # 40002
-HR_TARGET_REV         = 2   # 40003
-HR_TARGET_STEP        = 3   # 40004
+# Okunabilir (FC03 Read) — Holding Register (aynı blok, farklı adresler)
+HR_CURRENT_POSITION     = 9
+HR_CURRENT_LOAD         = 10
+HR_CALIBRATION_STATUS   = 11
+
+# mode_select değerleri
+MODE_STOP       = 0
+MODE_CALIBRATE  = 1
+MODE_SIGNAL     = 2   # Oransal sinyal modu
+MODE_DIGITAL    = 3   # Dijital adım modu
+MODE_RESERVED_4 = 4
+MODE_RESERVED_5 = 5
+
+# fast_open_close değerleri
+FAST_CLOSE = 0
+FAST_OPEN  = 1
+
 
 # ---------------------------------------------------------------------------
-# Veri Bloğu Oluştur
+# Motor Durumu
 # ---------------------------------------------------------------------------
 
-def build_context() -> ModbusServerContext:
-    """
-    Modbus slave veri bloğunu oluşturur.
-    Tüm register'lar sıfırla başlar, simülatör döngüsü günceller.
-    """
-    device = ModbusDeviceContext(
-        ir=ModbusSequentialDataBlock(0, [0] * 10),
-        hr=ModbusSequentialDataBlock(0, [0] * 25),
-    )
-    # pymodbus 3.8+: 'slaves' kwarg kaldırıldı, pozisyonel argüman
-    return ModbusServerContext(device, single=True)
+class MotorState:
+    def __init__(self, step_res: int, max_rev: int):
+        self.lock     = threading.Lock()
+        self.step_res = step_res   # PPR (pulse per revolution)
+        self.max_rev  = max_rev    # Maksimum tur sayısı
+
+        # Tek pozisyon kaynağı: toplam adım (float)
+        self._total_steps_f: float = 0.0
+
+        self.target_total_steps_f: float = 0.0
+
+        self.speed_steps_per_sec: float = 200.0  # adım/sn
+
+        self.is_moving:      bool  = False
+        self.is_calibrated:  bool  = False
+        self.calibrating:    bool  = False
+        self.load:           int   = 0   # signed int16 — yük/tork
+
+    @property
+    def current_position(self) -> int:
+        """Mevcut pozisyon — signed int16 olarak döner."""
+        return int(self._total_steps_f)
+
+    @property
+    def max_total_steps(self) -> float:
+        return float(self.max_rev * self.step_res)
+
+    def set_target_steps(self, total_steps: float) -> None:
+        """Hedef adımı sınırlar içinde günceller."""
+        self.target_total_steps_f = max(0.0, min(self.max_total_steps, total_steps))
 
 
 # ---------------------------------------------------------------------------
 # Simülasyon Döngüsü
 # ---------------------------------------------------------------------------
 
-def simulation_loop(context: ModbusServerContext) -> None:
-    """
-    Arka planda çalışan simülasyon döngüsü.
-    Her 100ms'de Input Register değerlerini günceller.
-
-    Simüle edilen davranış:
-        - Pozisyon (tur + adım): 0-10-0 sinüs dalgası, 30 saniyelik periyot
-        - Dis sinyal (mA): 4-20 mA arasi salinım  (ham: 400-2000)
-        - Tork (%): hareket hizina göre 20-80 arasi
-        - Status word:
-            Bit0 = Kalibrasyon Tamam  (5. saniyeden itibaren 1)
-            Bit1 = Hareket Halinde    (her zaman 1)
-            Bit2 = Sinyal Hatasi      (her zaman 0)
-    """
+def simulation_loop(context: ModbusServerContext, state: MotorState) -> None:
     logger.info("Simülasyon döngüsü başladı.")
 
-    start_time   = time.monotonic()
-    PERIOD       = 30.0
-    MAX_REV      = 10
-    STEP_RES     = 1000
-    UPDATE_DELAY = 0.1
-
-    tick = 0
+    UPDATE_DELAY = 0.05   # 50ms = 20 Hz
+    tick         = 0
 
     while True:
-        elapsed = time.monotonic() - start_time
-
-        # Pozisyon: sinüs dalgası
-        ratio    = (math.sin(2 * math.pi * elapsed / PERIOD) + 1) / 2
-        total    = ratio * MAX_REV
-        pos_rev  = int(total)
-        pos_step = int((total - pos_rev) * STEP_RES)
-
-        # Dis sinyal: 4-20 mA
-        signal_physical = 4.0 + ratio * 16.0
-        signal_raw      = int(signal_physical * 100)
-
-        # Tork
-        speed  = abs(math.cos(2 * math.pi * elapsed / PERIOD))
-        torque = int(20 + speed * 60)
-
-        # Status Word
-        cal_done    = 1 if elapsed > 5.0 else 0
-        status_word = (cal_done << 0) | (1 << 1)
-
-        # GEÇİCİ: Basınç sensörü register'ları
-        p1_raw = int((8.0 + ratio * 4.0) * 100)   # 8.00–12.00 bar arası
-        p2_raw = int((p1_raw/100 - ratio*3) * 100) # P1'den düşük
-    
-
-        # Input Register'lara yaz
         slave = context[0x00]
-        slave.setValues(4, IR_STATUS_WORD,        [status_word])
-        slave.setValues(4, IR_CURRENT_POS_REV,    [pos_rev])
-        slave.setValues(4, IR_CURRENT_POS_STEP,   [pos_step])
-        slave.setValues(4, IR_EXTERNAL_SIGNAL_MA, [signal_raw])
-        slave.setValues(4, IR_MOTOR_TORQUE_PCT,   [torque])
-        # GEÇİCİ: Basınç sensörü register'ları
-        slave.setValues(4, IR_PRESSURE_INLET,  [p1_raw])
-        slave.setValues(4, IR_PRESSURE_OUTLET, [p2_raw])
 
-        # Holding Register'lara gelen yazmaları her 2 saniyede logla
+        # ── 1. Tüm Holding Register'ları oku ─────────────────────────
+        hr = slave.getValues(3, 0, count=12)
+
+        mode      = hr[HR_MODE_SELECT]
+        turns     = hr[HR_TOTAL_TURNS]
+        step      = hr[HR_TARGET_STEP]
+        fast      = hr[HR_FAST_OPEN_CLOSE]
+        cal_dir   = hr[HR_CALIBRATION_DIR]
+
+        with state.lock:
+
+            # ── 2. Komutları her döngüde değerlendir ─────────────────
+            # Değişim tespiti yok: her döngüde mevcut register değeri okunur.
+            # fast_open_close önceliklidir.
+
+            if fast == FAST_OPEN:
+                if state.target_total_steps_f != state.max_total_steps:
+                    state.set_target_steps(state.max_total_steps)
+                    state.calibrating = False
+                    logger.info(f"[FAST] TAM AÇ — hedef: {state.max_rev} tur")
+                    
+            elif mode == MODE_STOP:
+                # fast_open_close aktifse önce sıfırla
+                if fast == FAST_OPEN:
+                    slave.setValues(3, HR_FAST_OPEN_CLOSE, [0])
+                    logger.info("[MODE] STOP — fast_open_close sıfırlandı.")
+                state.set_target_steps(state._total_steps_f)
+                state.calibrating = False
+                logger.info("[MODE] STOP — mevcut konumda kal.")
+
+            elif mode == MODE_CALIBRATE:
+                if not state.calibrating and not state.is_calibrated:
+                    if cal_dir == 0:
+                        state.set_target_steps(0.0)
+                        logger.info("[MODE] KALİBRASYON — sıfıra gidiliyor (yön=eksi).")
+                    else:
+                        state.set_target_steps(state.max_total_steps)
+                        logger.info("[MODE] KALİBRASYON — maksimuma gidiliyor (yön=artı).")
+                    state.calibrating   = True
+                    state.is_calibrated = False
+
+            elif mode == MODE_DIGITAL:
+                target = float(turns * state.step_res + step)
+                if state.target_total_steps_f != target:
+                    state.set_target_steps(target)
+                    logger.info(f"[MOD3] Hedef: {turns} tur, {step} adım")
+
+            elif mode == MODE_SIGNAL:
+                signal_val = hr[HR_PROPORTIONAL_SIGNAL]
+                ratio      = max(0, min(1000, signal_val)) / 1000.0
+                target     = ratio * state.max_total_steps
+                state.set_target_steps(target)
+
+            # ── 6. Pozisyonu güncelle ─────────────────────────────────
+            current = state._total_steps_f
+            target  = state.target_total_steps_f
+            delta   = target - current
+            max_move = state.speed_steps_per_sec * UPDATE_DELAY
+
+            if abs(delta) < 1.0:
+                state._total_steps_f = target
+                was_moving      = state.is_moving
+                state.is_moving = False
+                state.load      = 3  # Boşta düşük yük
+
+                if was_moving:
+                    logger.info(f"[POS] Hedefe ulaşıldı: {int(target)} adım")
+
+                # Kalibrasyon tamamlandı mı?
+                if state.calibrating:
+                    if cal_dir == 0 and state._total_steps_f < 1.0:
+                        state._total_steps_f = 0.0
+                        state.is_calibrated  = True
+                        state.calibrating    = False
+                        logger.info("[CAL] Kalibrasyon tamamlandı (sıfır noktası).")
+                        # mode_select'i STOP'a çek
+                        slave.setValues(3, HR_MODE_SELECT, [MODE_STOP])
+                    elif cal_dir == 1 and state._total_steps_f >= state.max_total_steps - 1:
+                        state.is_calibrated  = True
+                        state.calibrating    = False
+                        logger.info("[CAL] Kalibrasyon tamamlandı (maksimum nokta).")
+                        slave.setValues(3, HR_MODE_SELECT, [MODE_STOP])
+
+            else:
+                state.is_moving = True
+                move = min(abs(delta), max_move) * (1 if delta > 0 else -1)
+                new_pos = max(0.0, min(state.max_total_steps, state._total_steps_f + move))
+                state._total_steps_f = new_pos
+
+                # Hareket sırasında yük simülasyonu
+                state.load = int(min(80, 15 + abs(move) / max_move * 60))
+
+            # ── 7. Çıkış değerlerini hazırla ─────────────────────────
+            pos_out   = state.current_position  # signed int16
+            load_out  = state.load              # signed int16
+            calib_out = 1 if state.is_calibrated else 0
+
+            # signed int16 → uint16 dönüşümü (negatif değerler için)
+            if pos_out < 0:
+                pos_out = pos_out + 65536
+            if load_out < 0:
+                load_out = load_out + 65536
+
+        # ── 8. Register'lara yaz (lock dışında) ──────────────────────
+        slave.setValues(3, HR_CURRENT_POSITION,   [pos_out])
+        slave.setValues(3, HR_CURRENT_LOAD,        [load_out])
+        slave.setValues(3, HR_CALIBRATION_STATUS,  [calib_out])
+
+        # ── 9. Periyodik log ──────────────────────────────────────────
         if tick % 20 == 0:
-            hr       = slave.getValues(3, HR_MODE_SELECT, count=4)
-            mode     = hr[0]
-            ctrl     = hr[1]
-            tgt_rev  = hr[2]
-            tgt_step = hr[3]
-
+            with state.lock:
+                pos_display = state._total_steps_f
+                moving_str  = "EVET" if state.is_moving else "HAYIR"
+                calib_str   = "✔" if state.is_calibrated else "✘"
             logger.info(
-                f"Tur={pos_rev:2d}  Adim={pos_step:04d}  "
-                f"Sinyal={signal_physical:.2f}mA  Tork=%{torque:2d}  |  "
-                f"[Backend] Mod={mode}  Cmd={ctrl}  "
-                f"HedefTur={tgt_rev}  HedefAdim={tgt_step}"
+                f"POS: {pos_display:8.1f} adım  |  "
+                f"Yük: {state.load:3d}  "
+                f"Hareket: {moving_str}  "
+                f"Kalibre: {calib_str}  "
+                f"[Mod={mode} Fast={fast} Hedef={state.target_total_steps_f:.0f}]"
             )
 
         tick += 1
@@ -170,50 +243,49 @@ def simulation_loop(context: ModbusServerContext) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ana Giris
+# Yardımcılar
 # ---------------------------------------------------------------------------
 
+def build_context() -> ModbusServerContext:
+    """
+    12 adet Holding Register (addr 0–11) içeren datastore oluşturur.
+    Hem yazma (addr 0–8) hem okuma (addr 9–11) aynı HR bloğunda.
+    """
+    device = ModbusDeviceContext(
+        hr=ModbusSequentialDataBlock(0, [0] * 16),
+    )
+    return ModbusServerContext(device, single=True)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Modbus RTU Slave Simulatörü — Servo Vana Test Araci"
-    )
-    parser.add_argument(
-        "--port",
-        default="COM8",
-        help="Seri port (varsayilan: COM8). com0com ciftinin slave tarafi.",
-    )
-    parser.add_argument(
-        "--slave-id",
-        type=int,
-        default=1,
-        help="Modbus Slave ID (varsayilan: 1). hardware.yaml slave_id ile eslesmelidir.",
-    )
-    parser.add_argument(
-        "--baudrate",
-        type=int,
-        default=115200,
-        help="Seri port hizi (varsayilan: 115200).",
-    )
+    parser = argparse.ArgumentParser(description="Servo Vana Modbus RTU Simülatörü")
+    parser.add_argument("--port",     default="COM8",   help="Seri port (varsayılan: COM8)")
+    parser.add_argument("--slave-id", type=int, default=1, help="Modbus Slave ID")
+    parser.add_argument("--baudrate", type=int, default=230400, help="Baud rate (varsayılan: 230400)")
+    parser.add_argument("--max-rev",  type=int, default=10,  help="Maksimum tur sayısı")
+    parser.add_argument("--step-res", type=int, default=1000, help="Adım çözünürlüğü (PPR)")
     args = parser.parse_args()
 
     logger.info(
-        f"Modbus RTU Slave Simulatörü baslatiliyor...\n"
-        f"  Port     : {args.port}\n"
-        f"  Slave ID : {args.slave_id}\n"
-        f"  Baudrate : {args.baudrate}"
+        f"Simülatör başlatılıyor...\n"
+        f"  Port={args.port}  SlaveID={args.slave_id}  "
+        f"Baud={args.baudrate}  MaxTur={args.max_rev}  PPR={args.step_res}\n"
+        f"  Yazma  (FC06): addr=0 mode | addr=1 turns | addr=3 step | "
+        f"addr=5 fast | addr=8 cal_dir\n"
+        f"  Okuma  (FC03): addr=9 pos  | addr=10 load | addr=11 calib_status"
     )
 
+    state   = MotorState(step_res=args.step_res, max_rev=args.max_rev)
     context = build_context()
 
-    sim_thread = threading.Thread(
+    threading.Thread(
         target=simulation_loop,
-        args=(context,),
+        args=(context, state),
         daemon=True,
         name="SimLoop",
-    )
-    sim_thread.start()
+    ).start()
 
-    logger.info(f"{args.port} portunda dinleniyor... (Durdurmak icin Ctrl+C)")
+    logger.info(f"{args.port} dinleniyor... (Ctrl+C ile durdur)")
 
     StartSerialServer(
         context,
@@ -231,4 +303,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("Simulatör durduruldu.")
+        logger.info("Simülatör durduruldu.")

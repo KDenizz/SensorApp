@@ -109,71 +109,29 @@ class HoldingRegisters:
 
     def __init__(self, regs: dict[str, RegisterDef]) -> None:
         self._regs = regs
+        self.MODE_SELECT          = regs["mode_select"]
+        self.TOTAL_TURNS          = regs["total_turns"]
+        self.PROPORTIONAL_SIGNAL  = regs["proportional_signal"]
+        self.TARGET_STEP          = regs["target_step"]
+        self.FAST_OPEN_CLOSE      = regs["fast_open_close"]
+        self.CALIBRATION_DIRECTION = regs["calibration_direction"]
+        self.CURRENT_POSITION     = regs["current_position"]
+        self.CURRENT_LOAD         = regs["current_load"]
+        self.CALIBRATION_STATUS   = regs["calibration_status"]
 
-        # --- Kontrol ---
-        self.MODE_SELECT:           RegisterDef = regs["mode_select"]
-        self.CONTROL_WORD:          RegisterDef = regs["control_word"]
-        self.TARGET_REVOLUTIONS:    RegisterDef = regs["target_revolutions"]
-        self.TARGET_STEP:           RegisterDef = regs["target_step"]
-
-        # --- Genel Kurulum ---
-        self.MAX_REVOLUTIONS:       RegisterDef = regs["max_revolutions"]
-        self.CALIBRATION_DIRECTION: RegisterDef = regs["calibration_direction"]
-
-        # --- Kalibrasyon & Sinyal ---
-        self.ZERO_TORQUE_THRESHOLD:    RegisterDef = regs["zero_torque_threshold"]
-        self.PROPORTIONAL_SIGNAL_MIN:  RegisterDef = regs["proportional_signal_min"]
-        self.PROPORTIONAL_SIGNAL_MAX:  RegisterDef = regs["proportional_signal_max"]
-
-        # --- Gelişmiş Kontrol ---
-        self.STEP_RESOLUTION:          RegisterDef = regs["step_resolution"]
-        self.SIGNAL_LOSS_ACTION:       RegisterDef = regs["signal_loss_action"]
-        self.SIGNAL_LOSS_TARGET_REV:   RegisterDef = regs["signal_loss_target_rev"]
-        self.SIGNAL_LOSS_TARGET_STEP:  RegisterDef = regs["signal_loss_target_step"]
-        self.CLOSING_TORQUE_LIMIT:     RegisterDef = regs["closing_torque_limit"]
-        self.OPENING_KICK_TORQUE:      RegisterDef = regs["opening_kick_torque"]
-
-    def all(self) -> dict[str, RegisterDef]:
-        """Tüm Holding Register tanımlarını döndürür."""
+    def all(self):
         return self._regs
 
 
+
 class InputRegisters:
-    """
-    Input Register (3x) grubu — salt okunur telemetri registerları.
-
-    HALReader her polling döngüsünde block() ile tamamını tek seferde okur.
-    """
-
     def __init__(self, regs: dict[str, RegisterDef]) -> None:
         self._regs = regs
 
-        self.STATUS_WORD:          RegisterDef = regs["status_word"]
-        self.CURRENT_POSITION_REV: RegisterDef = regs["current_position_rev"]
-        self.CURRENT_POSITION_STEP: RegisterDef = regs["current_position_step"]
-        self.EXTERNAL_SIGNAL_MA:   RegisterDef = regs["external_signal_ma"]
-        self.MOTOR_TORQUE_PCT:     RegisterDef = regs["motor_torque_pct"]
-        # GEÇİCİ: Basınç sensörü register adresleri
-        self.PRESSURE_INLET_BAR:  RegisterDef = regs["pressure_inlet_bar"]
-        self.PRESSURE_OUTLET_BAR: RegisterDef = regs["pressure_outlet_bar"]
+    def block(self):
+        return 0, 1  # dummy
 
-
-    def block(self) -> Tuple[int, int]:
-        """
-        Tüm Input Register bloğunu tek Modbus isteğiyle okumak için
-        (başlangıç_adresi, register_sayısı) tuple'ı döndürür.
-
-        Kullanım:
-            addr, count = Reg.INPUT.block()
-            raw = await client.read_input_registers(addr, count)
-        """
-        addresses = [r.address for r in self._regs.values()]
-        start = min(addresses)
-        count = max(addresses) - start + 1
-        return start, count
-
-    def all(self) -> dict[str, RegisterDef]:
-        """Tüm Input Register tanımlarını döndürür."""
+    def all(self):
         return self._regs
 
 

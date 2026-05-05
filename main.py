@@ -29,7 +29,8 @@ from multiprocessing import context
 import signal
 import sys
 from typing import List
-
+import os
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from core.app_context import AppContext
@@ -41,6 +42,9 @@ from controller.main_controller import MainController
 from server.ws_server import create_app
 from hal.modbus_config import Reg  
 from hal.modbus_client import ModbusRTUClient
+import subprocess
+from fastapi import Request
+from fastapi.responses import JSONResponse
 
 # Logging yapılandırması
 logging.basicConfig(
@@ -60,7 +64,7 @@ async def main() -> None:
     # 1. AppContext Başlatma
     # ------------------------------------------------------------------
     context = AppContext()
-    # initialize_async: Queue'lar, asyncio.Event ve WsBroadcaster bu adımda oluşturulur
+   # initialize_async: Queue'lar, asyncio.Event ve WsBroadcaster bu adımda oluşturulur
     await context.initialize_async()
 
     # event_queue: ws_server → main_controller arası iletişim köprüsü
@@ -86,6 +90,56 @@ async def main() -> None:
     # 3. FastAPI Uygulaması
     # ------------------------------------------------------------------
     app = create_app(context)
+
+    async def update_settings(request: Request) -> JSONResponse:
+        """
+        Frontend'den gelen ayarları hardware.yaml'a yazar ve backend'i yeniden başlatır.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "Geçersiz JSON"}, status_code=400)
+
+        hardware = body.get("hardware")
+        if not hardware:
+            return JSONResponse({"ok": False, "error": "'hardware' alanı eksik"}, status_code=400)
+
+        try:
+            context.config.save_hardware(hardware)
+        except Exception as e:
+            logger.error(f"Ayarlar kaydedilemedi: {e}")
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+        logger.info("Ayarlar kaydedildi. Backend 1.5 saniye içinde yeniden başlatılıyor.")
+
+        async def _delayed_restart() -> None:
+            await asyncio.sleep(1.5)
+            subprocess.Popen([sys.executable] + sys.argv)
+            os._exit(0)
+
+        asyncio.create_task(_delayed_restart())
+        return JSONResponse({"ok": True, "message": "Ayarlar kaydedildi, yeniden başlatılıyor."})
+
+    app.add_api_route("/settings", update_settings, methods=["POST"])
+
+
+
+
+    # Frontend static dosyalarını serve et
+    if getattr(sys, 'frozen', False):
+        # PyInstaller exe içinden çalışıyor
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
+    frontend_path = os.path.join(base_path, "sensor_gui", "dist")
+
+    if os.path.exists(frontend_path):
+        app.mount("/", StaticFiles(directory=frontend_path, html=True), name="frontend")
+        logger.info(f"Frontend serve ediliyor: {frontend_path}")
+    else:
+        logger.warning(f"Frontend dist klasörü bulunamadı: {frontend_path}")
+
     hw = context.config.hardware
     shared_modbus = ModbusRTUClient(
         port=hw.get("port", "COM7"),
