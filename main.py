@@ -45,6 +45,10 @@ from hal.modbus_client import ModbusRTUClient
 import subprocess
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse
+
+
+
 
 # Logging yapılandırması
 logging.basicConfig(
@@ -122,6 +126,34 @@ async def main() -> None:
 
     app.add_api_route("/settings", update_settings, methods=["POST"])
 
+    async def list_ports(request: Request) -> JSONResponse:
+        try:
+            from serial.tools import list_ports
+            ports = []
+            for p in list_ports.comports():
+                ports.append({
+                    "device": p.device,
+                    "description": p.description,
+                })
+            return JSONResponse({"ok": True, "ports": ports})
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    app.add_api_route("/api/ports", list_ports, methods=["GET"])
+
+
+
+    async def setup_page(request: Request) -> HTMLResponse:
+        """Port seçim kurulum sayfası."""
+        if getattr(sys, 'frozen', False):
+            base = sys._MEIPASS
+        else:
+            base = os.path.dirname(os.path.abspath(__file__))
+        setup_html_path = os.path.join(base, "setup.html")
+        with open(setup_html_path, "r", encoding="utf-8") as f:
+            return HTMLResponse(f.read())
+
+    app.add_api_route("/setup", setup_page, methods=["GET"])
 
 
 
@@ -147,13 +179,28 @@ async def main() -> None:
         timeout=hw.get("modbus_timeout", 0.1),
         slave_id=hw.get("slave_id", 1),
     )
+    """    
     connected = await shared_modbus.connect()
     if not connected:
         logger.critical("Modbus bağlantısı kurulamadı, sistem başlatılamıyor.")
+        logger.warning("Motor bağlandığında config/hardware.yaml'ı güncelleyip yeniden başlatın.")
+
         return
 
     context.modbus_client = shared_modbus
 
+    """
+
+
+    context.modbus_client = shared_modbus
+    connected = await shared_modbus.connect()
+    if not connected:
+        logger.warning(f"Modbus bağlantısı kurulamadı (port={hw.get('port')}).")
+        logger.warning("Frontend açılacak. Setup sayfasından port seçin: http://localhost:8000/setup")
+        context.modbus_connected = False
+    else:
+        context.modbus_connected = True
+        logger.info("Modbus bağlantısı kuruldu.")
 
     # ------------------------------------------------------------------
     # 4. Async Task'ları Başlat
