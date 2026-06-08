@@ -61,7 +61,7 @@ class ModbusRTUClient:
     def __init__(
         self,
         port: str,
-        baudrate: int = 115200,
+        baudrate: int = 230400,
         timeout: float = 0.1,
         slave_id: int = 1,
     ):

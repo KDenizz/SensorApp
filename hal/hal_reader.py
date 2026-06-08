@@ -39,9 +39,9 @@ class HALReader:
 
         hw = self.context.config.hardware
         self._port:      str   = hw.get("port",           "COM1")
-        self._baudrate:  int   = hw.get("baud_rate",      115200)
+        self._baudrate:  int   = hw.get("baud_rate",      230400)
         self._slave_id:  int   = hw.get("slave_id",       1)
-        self._timeout:   float = hw.get("modbus_timeout", 0.1)
+        self._timeout:   float = hw.get("modbus_timeout", 0.2)
 
         rate = hw.get("sample_rate_hz", 50)
         if rate <= 0:
@@ -115,8 +115,8 @@ class HALReader:
 
         # FC03 ile Holding Register oku (addr=9, count=3)
         raw = await self._client.read_holding_registers(
-            address=9,
-            count=3,
+            address=0,
+            count=21,
         )
 
         if raw is None:
@@ -129,8 +129,8 @@ class HALReader:
 
         self._consecutive_errors = 0
 
-        if len(raw) < 3:
-            logger.error(f"Eksik veri: beklenen=3, gelen={len(raw)}")
+        if len(raw) < 21:
+            logger.error(f"Eksik veri: beklenen=21, gelen={len(raw)}")
             return
 
         packet = self._parse(raw)
@@ -140,18 +140,17 @@ class HALReader:
         await self.context.raw_data_queue.put(packet)
         await self.context.broadcaster.publish("SENSOR_DATA", packet)
 
-    def _parse(self, raw: list[int]) -> Optional[SensorPacket]:
-        pos_raw  = raw[0]   # addr 9 — signed int16
-        load_raw = raw[1]   # addr 10 — signed int16
-        calib    = raw[2]   # addr 11
+    def _parse(self, raw: list[int]) -> Optional[SensorPacket]: 
+        h = Reg.HOLDING
 
-        # unsigned → signed dönüşüm
-        position = pos_raw  if pos_raw  < 32768 else pos_raw  - 65536
-        load     = load_raw if load_raw < 32768 else load_raw - 65536
+        # Konum & yük — signed dönüşüm artık RegisterDef.from_uint16 ile (elle çevirme YOK)
+        position = int(h.CURRENT_POSITION.from_uint16(raw[h.CURRENT_POSITION.address]))
+        load     = int(h.CURRENT_LOAD.from_uint16(raw[h.CURRENT_LOAD.address]))
+        calib    = int(raw[h.CALIBRATION_STATUS.address])
+
         step_resolution = self.context.config.hardware.get("step_resolution", 1000)
         turns = position // step_resolution
         steps = position % step_resolution
-
 
         return SensorPacket(
             p1_raw=0.0,
@@ -162,8 +161,22 @@ class HALReader:
             motor_steps=steps,
             motor_torque_pct=float(abs(load)),
             motor_current_ma=float(load),
-            calibration_status=int(calib),  # addr=11 — 0: kalibre değil, 1: kalibre
+            calibration_status=calib,
             timestamp=time.monotonic(),
+            # --- Cihaz register geri-okuması ---
+            mode_select=int(raw[h.MODE_SELECT.address]),
+            total_turns=int(raw[h.TOTAL_TURNS.address]),
+            signal_lost_flag=int(raw[h.SIGNAL_LOST_FLAG.address]),
+            signal_loss_action=int(raw[h.SIGNAL_LOSS_ACTION.address]),
+            seating_load=int(raw[h.SEATING_LOAD.address]),
+            backoff_offset=int(raw[h.BACKOFF_OFFSET.address]),
+            pid_setpoint=h.PID_SETPOINT.from_uint16(raw[h.PID_SETPOINT.address]),
+            pid_kp=h.PID_KP.from_uint16(raw[h.PID_KP.address]),
+            pid_ki=h.PID_KI.from_uint16(raw[h.PID_KI.address]),
+            pid_kd=h.PID_KD.from_uint16(raw[h.PID_KD.address]),
+            pid_deadband=h.PID_DEADBAND.from_uint16(raw[h.PID_DEADBAND.address]),
+            adc_offset=h.ADC_OFFSET.from_uint16(raw[h.ADC_OFFSET.address]),
+            adc_gain=h.ADC_GAIN.from_uint16(raw[h.ADC_GAIN.address]),
         )
 
     def _check_status_bits(self, status_word: int) -> None:

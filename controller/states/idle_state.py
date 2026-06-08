@@ -17,6 +17,7 @@ Mimari Kural:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional, Dict, Any, TYPE_CHECKING
 
@@ -54,9 +55,13 @@ class IdleState(BaseState):
             priority=1
         )
         await self.context.command_queue.put((cmd.priority, cmd))
-
     async def update(self, dt: float) -> Optional[BaseState]:
-        """Sadece bekler, aktif bir döngü koşturmaz."""
+        """raw_data_queue'yu boşaltır — uzun çalışmada bellek sızıntısını önler."""
+        try:
+            while True:
+                self.context.raw_data_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
         return None
 
     async def on_exit(self) -> None:

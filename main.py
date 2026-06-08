@@ -34,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from core.app_context import AppContext
-from hal.serial_port_manager import AsyncSerialPortManager
+#from hal.serial_port_manager import AsyncSerialPortManager
 from hal.hal_reader import HALReader
 from hal.hal_writer import HALWriter
 from hal.data_logger import DataLogger
@@ -46,7 +46,7 @@ import subprocess
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.responses import HTMLResponse
-
+from fastapi.middleware.cors import CORSMiddleware
 
 
 
@@ -87,14 +87,21 @@ async def main() -> None:
     # ------------------------------------------------------------------
     # 2. SerialPortManager Async Başlatma
     # ------------------------------------------------------------------
-    serial_manager = AsyncSerialPortManager()
-    await serial_manager.initialize_async()
+    #serial_manager = AsyncSerialPortManager()
+    #await serial_manager.initialize_async()
 
     # ------------------------------------------------------------------
     # 3. FastAPI Uygulaması
     # ------------------------------------------------------------------
     app = create_app(context)
 
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173"],  # Vite dev server
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     async def update_settings(request: Request) -> JSONResponse:
         """
         Frontend'den gelen ayarları hardware.yaml'a yazar ve backend'i yeniden başlatır.
@@ -126,6 +133,12 @@ async def main() -> None:
 
     app.add_api_route("/settings", update_settings, methods=["POST"])
 
+
+    async def get_settings(request: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "hardware": context.config.hardware})
+
+    app.add_api_route("/settings", get_settings, methods=["GET"])
+    
     async def list_ports(request: Request) -> JSONResponse:
         try:
             from serial.tools import list_ports
@@ -175,8 +188,8 @@ async def main() -> None:
     hw = context.config.hardware
     shared_modbus = ModbusRTUClient(
         port=hw.get("port", "COM7"),
-        baudrate=hw.get("baud_rate", 115200),
-        timeout=hw.get("modbus_timeout", 0.1),
+        baudrate=hw.get("baud_rate", 230400),
+        timeout=hw.get("modbus_timeout", 0.2),
         slave_id=hw.get("slave_id", 1),
     )
     """    
@@ -283,3 +296,5 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"Kritik başlatma hatası: {e}", exc_info=True)
         sys.exit(1)
+
+    

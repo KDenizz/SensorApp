@@ -3,6 +3,8 @@ AppContext: Sistem genelindeki paylaşımlı, asenkron kaynakları barındıran 
 """
 
 import asyncio
+import sys                          # ← YENİ
+from pathlib import Path            # ← YENİ
 import logging
 from typing import Tuple, Dict, Any, Optional
 
@@ -35,7 +37,11 @@ class AppContext:
             return
 
         # 1. Konfigürasyon Yöneticisi (Fail-Fast & Log)
-        self.config = ConfigParser(config_root="config")
+        if getattr(sys, 'frozen', False):
+            _cfg = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent)) / "config"   # exe → E:\ServoApp\config
+        else:
+            _cfg = Path(__file__).resolve().parent.parent / "config"  # core/ → proje_kökü/config
+        self.config = ConfigParser(config_root=str(_cfg))
         try:
             self.config.load_all()
         except Exception as e:

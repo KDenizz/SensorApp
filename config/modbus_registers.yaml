@@ -46,6 +46,7 @@ holding_registers:
     address: 9
     access: "rw"
     scaling: 1
+    signed: true
     description: "Mevcut pozisyon (signed int16)"
     mode: "İzleme"
 
@@ -53,6 +54,7 @@ holding_registers:
     address: 10
     access: "rw"
     scaling: 1
+    signed: true
     description: "Anlık yük/akım (signed int16)"
     mode: "İzleme"
 
@@ -62,6 +64,87 @@ holding_registers:
     scaling: 1
     description: "Kalibrasyon durumu (0=yapılmadı, 1=hazır)"
     mode: "İzleme"
+
+  signal_lost_flag:
+    address: 6
+    access: "rw"
+    scaling: 1
+    description: "Sinyal kaybı bayrağı"
+    mode: "Emniyet"
+
+  signal_loss_action:
+    address: 7
+    access: "rw"
+    scaling: 1
+    description: "Sinyal kaybı eylemi (kal/kapat/hedefe git)"
+    mode: "Emniyet"
+
+  seating_load:
+    address: 12
+    access: "rw"
+    scaling: 1
+    description: "Sıkışma (seating) akım/yük eşiği — home tespiti"
+    mode: "Mod 01"
+
+  backoff_offset:
+    address: 13
+    access: "rw"
+    scaling: 1
+    description: "Seat sonrası geri çekilme miktarı"
+    mode: "Mod 01"
+
+  pid_setpoint:
+    address: 14
+    access: "rw"
+    scaling: 100
+    description: "PID hedef basınç (Bar ×100)"
+    mode: "Mod 05"
+
+  pid_kp:
+    address: 15
+    access: "rw"
+    scaling: 100
+    signed: true
+    description: "PID Kp (×100)"
+    mode: "Mod 05"
+
+  pid_ki:
+    address: 16
+    access: "rw"
+    scaling: 100
+    signed: true
+    description: "PID Ki (×100)"
+    mode: "Mod 05"
+
+  pid_kd:
+    address: 17
+    access: "rw"
+    scaling: 100
+    signed: true
+    description: "PID Kd (×100)"
+    mode: "Mod 05"
+
+  pid_deadband:
+    address: 18
+    access: "rw"
+    scaling: 100
+    description: "PID ölü bant / histerezis (Bar ×100)"
+    mode: "Mod 05"
+
+  adc_offset:
+    address: 19
+    access: "rw"
+    scaling: 1000
+    signed: true
+    description: "Sensör ofseti (UI'da Bar, register'da mBar)"
+    mode: "Sensör Kalibrasyon"
+
+  adc_gain:
+    address: 20
+    access: "rw"
+    scaling: 1000
+    description: "Sensör gain çarpanı (×1000)"
+    mode: "Sensör Kalibrasyon"
 
 input_registers:
   dummy:

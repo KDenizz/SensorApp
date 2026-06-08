@@ -41,7 +41,7 @@ class AsyncSerialPortManager:
         manager = AsyncSerialPortManager()
         await manager.initialize_async()    # Event loop aktifken çağırılmalı
         # Ardından HALReader/HALWriter run_in_executor içinden:
-        manager.open("COM3", 115200)
+        manager.open("COM3", 230400)
         data = manager.readline()
         manager.write(b"GOTO 500\\n")
         manager.close()

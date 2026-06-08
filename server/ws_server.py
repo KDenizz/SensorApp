@@ -155,18 +155,16 @@ async def _handle_client_message(raw_data: str, context: AppContext) -> None:
     elif cmd_type == "GOTO_POSITION":
         turns = int(payload.get("turns", 0))
         step  = int(payload.get("step", 0))
-        # Önce mod 3
-        logger.info(f"Frontend: GOTO_POSITION → {turns} tur, {step} adım")
-
+        # addr 3 = mutlak toplam tick. Tek MOVE_ABSOLUTE komutu (kompozit):
+        # mod+hedef sırası garantili, addr 1 (kalibrasyon referansı) ASLA ezilmez.
+        step_res = int(context.config.hardware.get("step_resolution", 1000))
+        target_ticks = turns * step_res + step
+        if not (0 <= target_ticks <= 32767):
+            logger.warning(f"GOTO reddedildi: hedef tick {target_ticks} aralık dışı (0–32767).")
+            return
+        logger.info(f"Frontend: GOTO_POSITION → {turns} tur + {step} adım = {target_ticks} tick")
         await context.command_queue.put((1, MotorCommand(
-            type=CommandType.SET_MODE, value=3.0, priority=1
-        )))
-        # Sonra hedefler
-        await context.command_queue.put((1, MotorCommand(
-            type=CommandType.SET_TARGET_TURNS, value=float(turns), priority=1
-        )))
-        await context.command_queue.put((1, MotorCommand(
-            type=CommandType.SET_TARGET_STEP, value=float(step), priority=1
+            type=CommandType.MOVE_ABSOLUTE, value=float(target_ticks), priority=1
         )))
         
     elif cmd_type == "STOP":
@@ -204,6 +202,80 @@ async def _handle_client_message(raw_data: str, context: AppContext) -> None:
         )
         await context.command_queue.put((1, command))
 
+    elif cmd_type == "SET_PID_SETPOINT":
+        setpoint = float(payload.get("setpoint", 0.0))
+        if setpoint < 0:
+            logger.warning(f"Geçersiz setpoint: {setpoint}")
+            return
+        if setpoint > 500:
+            logger.warning(f"Setpoint güvenlik sınırı aşıldı: {setpoint:.1f} > 500 bar — reddedildi.")
+            return
+        
+        logger.info(f"Frontend: PID setpoint → {setpoint} Bar")
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_PID_SETPOINT, value=setpoint, priority=1
+        )))
+
+
+    elif cmd_type == "SET_PID_GAINS":
+        kp = float(payload.get("kp", 0.0))
+        ki = float(payload.get("ki", 0.0))
+        kd = float(payload.get("kd", 0.0))
+        logger.info(f"Frontend: PID kazançları → Kp={kp}, Ki={ki}, Kd={kd}")
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_PID_GAINS, priority=1,
+            metadata={"kp": kp, "ki": ki, "kd": kd},
+        )))
+
+    elif cmd_type == "SET_PID_DEADBAND":
+        deadband = float(payload.get("deadband", 0.0))
+        if deadband < 0:
+            logger.warning(f"Geçersiz ölü bant: {deadband}")
+            return
+        logger.info(f"Frontend: PID ölü bant → {deadband} Bar")
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_PID_DEADBAND, value=deadband, priority=1
+        )))
+
+    elif cmd_type == "SET_ADC_OFFSET":
+        offset = float(payload.get("offset", 0.0))   # signed olabilir
+        logger.info(f"Frontend: ADC ofset → {offset} Bar")
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_ADC_OFFSET, value=offset, priority=1
+        )))
+
+    elif cmd_type == "SET_ADC_GAIN":
+        gain = float(payload.get("gain", 1.0))
+        if gain <= 0:
+            logger.warning(f"Geçersiz gain (>0 olmalı): {gain}")
+            return
+        logger.info(f"Frontend: ADC gain → {gain}")
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_ADC_GAIN, value=gain, priority=1
+        )))
+
+    elif cmd_type == "START_CALIBRATION":
+        calib_dir   = int(payload.get("calib_dir", 0))
+        seating     = float(payload.get("seating_load", 0))
+        backoff     = float(payload.get("backoff_offset", 0))
+        total_turns = int(payload.get("total_turns", 0))
+        if total_turns <= 0:
+            logger.warning(f"Kalibrasyon reddedildi: total_turns geçersiz ({total_turns}).")
+            return
+        if calib_dir not in (0, 1):
+            logger.warning(f"Kalibrasyon reddedildi: calib_dir 0/1 olmalı ({calib_dir}).")
+            return
+        logger.info(f"Frontend: KALİBRASYON BAŞLAT → dir={calib_dir}, seating={seating}, "
+                    f"backoff={backoff}, total_turns={total_turns}")
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.START_CALIBRATION, priority=1,
+            metadata={
+                "calib_dir": float(calib_dir),
+                "seating_load": seating,
+                "backoff_offset": backoff,
+                "total_turns": float(total_turns),
+            },
+        )))
     # ----------------------------------------------------------
     # Bilinmeyen komut
     # ----------------------------------------------------------

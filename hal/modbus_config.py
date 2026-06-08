@@ -61,6 +61,7 @@ class RegisterDef:
     scaling: int
     description: str
     mode: str
+    signed: bool = False  
 
     @property
     def is_readonly(self) -> bool:
@@ -86,6 +87,35 @@ class RegisterDef:
              physical=75.0,  scaling=1    →  75
         """
         return int(round(physical_value * self.scaling))
+    
+    def from_uint16(self, raw: int) -> float:
+        """Ham uint16 register değerini fiziksel değere çevirir (signed + scaling).
+        Tek doğru kaynak burası — reader artık elle two's complement yapmaz."""
+        val = raw
+        if self.signed and val >= 0x8000:      # 32768
+            val -= 0x10000                      # 65536
+        if self.scaling == 1:
+            return float(val)
+        return round(val / self.scaling, 4)
+
+    def to_uint16(self, physical: float) -> int:
+        """Fiziksel değeri register'a yazılacak uint16'ya çevirir (scaling + two's complement).
+        Aralık dışı değerde SESSİZCE WRAP ETMEZ — ValueError fırlatır (güvenlik)."""
+        raw = int(round(physical * self.scaling))
+        if self.signed:
+            if not (-32768 <= raw <= 32767):
+                raise ValueError(
+                    f"{self.name}: {physical} (ham={raw}) signed int16 aralığı dışında [-32768, 32767]."
+                )
+            if raw < 0:
+                raw += 0x10000
+        else:
+            if not (0 <= raw <= 65535):
+                raise ValueError(
+                    f"{self.name}: {physical} (ham={raw}) uint16 aralığı dışında [0, 65535]."
+                )
+        return raw & 0xFFFF
+
 
     def __repr__(self) -> str:
         modbus_addr = (30001 if self.is_readonly else 40001) + self.address
@@ -118,6 +148,17 @@ class HoldingRegisters:
         self.CURRENT_POSITION     = regs["current_position"]
         self.CURRENT_LOAD         = regs["current_load"]
         self.CALIBRATION_STATUS   = regs["calibration_status"]
+        self.SIGNAL_LOST_FLAG     = regs["signal_lost_flag"]
+        self.SIGNAL_LOSS_ACTION   = regs["signal_loss_action"]
+        self.SEATING_LOAD         = regs["seating_load"]
+        self.BACKOFF_OFFSET       = regs["backoff_offset"]
+        self.PID_SETPOINT         = regs["pid_setpoint"]
+        self.PID_KP               = regs["pid_kp"]
+        self.PID_KI               = regs["pid_ki"]
+        self.PID_KD               = regs["pid_kd"]
+        self.PID_DEADBAND         = regs["pid_deadband"]
+        self.ADC_OFFSET           = regs["adc_offset"]
+        self.ADC_GAIN             = regs["adc_gain"]
 
     def all(self):
         return self._regs
@@ -257,6 +298,8 @@ class _RegisterMap:
                     scaling=int(fields.get("scaling", 1)),
                     description=str(fields.get("description", "")).strip(),
                     mode=str(fields.get("mode", "")).strip(),
+                    signed=bool(fields.get("signed", False)),   # ← YENİ
+
                 )
             except (KeyError, TypeError, ValueError) as e:
                 raise KeyError(

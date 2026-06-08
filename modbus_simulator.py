@@ -59,13 +59,29 @@ MODE_STOP       = 0
 MODE_CALIBRATE  = 1
 MODE_SIGNAL     = 2   # Oransal sinyal modu
 MODE_DIGITAL    = 3   # Dijital adım modu
-MODE_RESERVED_4 = 4
-MODE_RESERVED_5 = 5
+#MODE_RESERVED_4 = 4
+#MODE_RESERVED_5 = 5
 
 # fast_open_close değerleri
 FAST_CLOSE = 0
 FAST_OPEN  = 1
+# Yeni register adresleri (C# test aracından doğrulanmış)
+#HR_SIGNAL_LOST_FLAG     = 6
+HR_SIGNAL_LOSS_ACTION   = 7
+HR_SEATING_LOAD         = 12
+HR_BACKOFF_OFFSET       = 13
+HR_PID_SETPOINT         = 14
+HR_PID_KP               = 15
+HR_PID_KI               = 16
+HR_PID_KD               = 17
+HR_PID_DEADBAND         = 18
+HR_ADC_OFFSET           = 19
+HR_ADC_GAIN             = 20
 
+# Yeni mod sabitleri
+MODE_TTL    = 4   # fast open/close — artık mode_select üzerinden
+MODE_PID    = 5   # dahili PID
+MODE_SMART  = 6   # akıllı tork
 
 # ---------------------------------------------------------------------------
 # Motor Durumu
@@ -117,7 +133,7 @@ def simulation_loop(context: ModbusServerContext, state: MotorState) -> None:
         slave = context[0x00]
 
         # ── 1. Tüm Holding Register'ları oku ─────────────────────────
-        hr = slave.getValues(3, 0, count=12)
+        hr = slave.getValues(3, 0, count=21)  # 0-20 arası tüm register'ları oku (yeni eklenenler dahil)
 
         mode      = hr[HR_MODE_SELECT]
         turns     = hr[HR_TOTAL_TURNS]
@@ -158,16 +174,38 @@ def simulation_loop(context: ModbusServerContext, state: MotorState) -> None:
                     state.is_calibrated = False
 
             elif mode == MODE_DIGITAL:
-                target = float(turns * state.step_res + step)
+                # addr 3 = mutlak toplam tick (turns/addr1 KULLANILMAZ — çift sayım giderildi)
+                target = float(step)
                 if state.target_total_steps_f != target:
                     state.set_target_steps(target)
-                    logger.info(f"[MOD3] Hedef: {turns} tur, {step} adım")
+                    logger.info(f"[MOD3] Hedef (mutlak tick): {int(target)}")
 
             elif mode == MODE_SIGNAL:
                 signal_val = hr[HR_PROPORTIONAL_SIGNAL]
                 ratio      = max(0, min(1000, signal_val)) / 1000.0
                 target     = ratio * state.max_total_steps
                 state.set_target_steps(target)
+
+            elif mode == MODE_TTL:
+                # OPEN_FULL / CLOSE_FULL: hal_writer hedefi TARGET_STEP'e yazıp MODE=3 yapar.
+                # Simülatörde Mod 4 seçilirse: fast_open_close register'ına bak.
+                if fast == FAST_OPEN:
+                    state.set_target_steps(state.max_total_steps)
+                    logger.info("[MOD4] TAM AÇ")
+                else:
+                    state.set_target_steps(0.0)
+                    logger.info("[MOD4] TAM KAPAT")
+
+            elif mode == MODE_PID:
+                # PID: firmware halleder. Simülatörde mevcut konumda kal.
+                # Setpoint register'ını oku — sadece log amaçlı.
+                sp_raw = hr[HR_PID_SETPOINT]
+                sp_bar = sp_raw / 100.0
+                if tick % 40 == 0:
+                    logger.info(f"[MOD5/PID] Setpoint: {sp_bar:.2f} bar — simülatörde pozisyon sabit.")
+
+            elif mode == MODE_SMART:
+                logger.debug("[MOD6] Akıllı tork — simülatörde pasif.")
 
             # ── 6. Pozisyonu güncelle ─────────────────────────────────
             current = state._total_steps_f
@@ -235,7 +273,8 @@ def simulation_loop(context: ModbusServerContext, state: MotorState) -> None:
                 f"Yük: {state.load:3d}  "
                 f"Hareket: {moving_str}  "
                 f"Kalibre: {calib_str}  "
-                f"[Mod={mode} Fast={fast} Hedef={state.target_total_steps_f:.0f}]"
+                f"[Mod={mode} Fast={fast} Hedef={state.target_total_steps_f:.0f} "
+                f"PID_SP={hr[HR_PID_SETPOINT]/100.0:.2f}bar ADC_gain={hr[HR_ADC_GAIN]}]"
             )
 
         tick += 1
@@ -248,11 +287,11 @@ def simulation_loop(context: ModbusServerContext, state: MotorState) -> None:
 
 def build_context() -> ModbusServerContext:
     """
-    12 adet Holding Register (addr 0–11) içeren datastore oluşturur.
-    Hem yazma (addr 0–8) hem okuma (addr 9–11) aynı HR bloğunda.
+    32 adet Holding Register (addr 0–31) içeren datastore oluşturur.
+    Addr 0–20 aktif kullanımda; 21–31 rezerv.
     """
     device = ModbusDeviceContext(
-        hr=ModbusSequentialDataBlock(0, [0] * 16),
+        hr=ModbusSequentialDataBlock(0, [0] * 32),
     )
     return ModbusServerContext(device, single=True)
 

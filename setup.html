@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <title>Servo Vana — İlk Kurulum</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f3f4f6;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+      padding: 32px;
+      max-width: 600px;
+      width: 100%;
+    }
+    h1 {
+      color: #007f78;
+      font-size: 24px;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      color: #6b7280;
+      font-size: 14px;
+      margin-bottom: 24px;
+    }
+    .section {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      margin-bottom: 6px;
+    }
+    select, input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1.5px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 14px;
+      background: white;
+    }
+    select:focus, input:focus {
+      outline: none;
+      border-color: #007f78;
+    }
+    .port-list {
+      max-height: 200px;
+      overflow-y: auto;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #f9fafb;
+    }
+    .port-item {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: background 0.1s;
+    }
+    .port-item:last-child { border-bottom: none; }
+    .port-item:hover { background: #f3f4f6; }
+    .port-item.selected {
+      background: #d1fae5;
+      border-left: 4px solid #007f78;
+    }
+    .port-device {
+      font-weight: 600;
+      color: #111827;
+    }
+    .port-desc {
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .empty-state {
+      padding: 24px;
+      text-align: center;
+      color: #9ca3af;
+      font-size: 14px;
+    }
+    button {
+      width: 100%;
+      padding: 12px;
+      background: #007f78;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    button:hover { background: #005c56; }
+    button:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
+    }
+    .refresh-btn {
+      background: #6b7280;
+      margin-bottom: 12px;
+    }
+    .refresh-btn:hover { background: #4b5563; }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .status {
+      margin-top: 16px;
+      padding: 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      display: none;
+    }
+    .status.success {
+      background: #d1fae5;
+      color: #065f46;
+      display: block;
+    }
+    .status.error {
+      background: #fee2e2;
+      color: #991b1b;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>⚙ Servo Vana — Donanım Kurulumu</h1>
+    <p class="subtitle">RS-485 adaptörünüzü seçin ve motor parametrelerini girin.</p>
+
+    <div class="section">
+      <label>1. COM Portu Seçin</label>
+      <button class="refresh-btn" onclick="loadPorts()">🔄 Portları Yenile</button>
+      <div class="port-list" id="portList">
+        <div class="empty-state">Portlar yükleniyor...</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="row">
+        <div>
+          <label>2. Baud Rate</label>
+          <select id="baudRate">
+            <option value="9600">9600</option>
+            <option value="19200">19200</option>
+            <option value="38400">38400</option>
+            <option value="57600">57600</option>
+            <option value="115200">115200</option>
+            <option value="230400" selected>230400</option>
+          </select>
+        </div>
+        <div>
+          <label>3. Slave ID</label>
+          <input type="number" id="slaveId" value="1" min="1" max="247">
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="row">
+        <div>
+          <label>4. Adım Çözünürlüğü (PPR)</label>
+          <input type="number" id="stepResolution" value="1000" min="1">
+        </div>
+        <div>
+          <label>5. Maks. Tur Sayısı</label>
+          <input type="number" id="maxRevolutions" value="10" min="1">
+        </div>
+      </div>
+    </div>
+
+    <button id="saveBtn" onclick="saveSettings()" disabled>
+      ✓ Kaydet ve Başlat
+    </button>
+
+    <div id="status" class="status"></div>
+  </div>
+
+  <script>
+    let selectedPort = null;
+
+    async function loadPorts() {
+      const list = document.getElementById('portList');
+      list.innerHTML = '<div class="empty-state">Portlar yükleniyor...</div>';
+      try {
+        const res = await fetch('/api/ports');
+        const data = await res.json();
+        if (!data.ok || !data.ports || data.ports.length === 0) {
+          list.innerHTML = '<div class="empty-state">⚠ Hiç COM portu bulunamadı. RS-485 adaptörünüzü takın ve "Portları Yenile" butonuna basın.</div>';
+          return;
+        }
+        list.innerHTML = '';
+        data.ports.forEach(p => {
+          const item = document.createElement('div');
+          item.className = 'port-item';
+          item.innerHTML = `
+            <div>
+              <div class="port-device">${p.device}</div>
+              <div class="port-desc">${p.description || ''}</div>
+            </div>
+            <div>›</div>
+          `;
+          item.onclick = () => selectPort(p.device, item);
+          list.appendChild(item);
+        });
+      } catch (e) {
+        list.innerHTML = '<div class="empty-state">❌ Portlar yüklenemedi: ' + e.message + '</div>';
+      }
+    }
+
+    function selectPort(device, element) {
+      selectedPort = device;
+      document.querySelectorAll('.port-item').forEach(el => el.classList.remove('selected'));
+      element.classList.add('selected');
+      document.getElementById('saveBtn').disabled = false;
+    }
+
+    async function saveSettings() {
+      const status = document.getElementById('status');
+      const saveBtn = document.getElementById('saveBtn');
+      
+      if (!selectedPort) {
+        status.className = 'status error';
+        status.textContent = '⚠ Önce bir port seçin.';
+        return;
+      }
+
+      const settings = {
+        hardware: {
+          port: selectedPort,
+          baud_rate: parseInt(document.getElementById('baudRate').value),
+          slave_id: parseInt(document.getElementById('slaveId').value),
+          step_resolution: parseInt(document.getElementById('stepResolution').value),
+          max_revolutions: parseInt(document.getElementById('maxRevolutions').value),
+          modbus_timeout: 0.1,
+          sample_rate_hz: 50,
+          max_consecutive_errors: 10,
+          max_reconnect_attempts: 5
+        }
+      };
+
+      saveBtn.disabled = true;
+      saveBtn.textContent = '⏳ Kaydediliyor...';
+      status.className = 'status';
+      status.style.display = 'none';
+
+      try {
+        const res = await fetch('/settings', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(settings)
+        });
+        const data = await res.json();
+        if (data.ok) {
+          status.className = 'status success';
+          status.textContent = '✓ Ayarlar kaydedildi. 3 saniye içinde ana sayfaya yönlendiriliyorsunuz...';
+          setTimeout(() => { window.location.href = '/'; }, 3000);
+        } else {
+          status.className = 'status error';
+          status.textContent = '❌ Hata: ' + (data.error || 'Bilinmeyen hata');
+          saveBtn.disabled = false;
+          saveBtn.textContent = '✓ Kaydet ve Başlat';
+        }
+      } catch (e) {
+        status.className = 'status error';
+        status.textContent = '❌ Bağlantı hatası: ' + e.message;
+        saveBtn.disabled = false;
+        saveBtn.textContent = '✓ Kaydet ve Başlat';
+      }
+    }
+
+    loadPorts();
+  </script>
+</body>
+</html>

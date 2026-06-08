@@ -31,6 +31,12 @@ class CommandType(Enum):
     OPEN_FULL        = auto()  # Tam Aç
     CLOSE_FULL       = auto()  # Tam Kapat
     SET_MODE         = auto()  # Mod seçimi 
+    SET_PID_SETPOINT = auto()   # addr 14 — FC06
+    SET_PID_GAINS    = auto()   # addr 15-17 — FC16 (kp,ki,kd atomik)
+    SET_PID_DEADBAND = auto()   # addr 18 — FC06
+    SET_ADC_OFFSET   = auto()   # addr 19 — FC06
+    SET_ADC_GAIN     = auto()   # addr 20 — FC06
+    START_CALIBRATION = auto()  # Config (dir,seating,backoff,total_turns) SIRAYLA yaz + Mod 1
 
 class ControlMode(Enum):
     """Aktif kontrol algoritmaları."""
@@ -67,6 +73,20 @@ class SensorPacket:
     motor_current_ma: float = 0.0  # 30004 — Dış sinyal (mA)
     calibration_status: int = 0    # addr=11 — 0: kalibre değil, 1: kalibre
     timestamp: float = 0.0          # Verinin alındığı sistem zamanı
+        # --- Cihaz register geri-okuması (FC03 0-20 bloğu — A adımı) ---
+    mode_select: int = 0            # addr 0 — cihazın aktif modu
+    total_turns: int = 0            # addr 1 — yapılandırılmış maks tur (%100 referansı)
+    signal_lost_flag: int = 0       # addr 6
+    signal_loss_action: int = 0     # addr 7
+    seating_load: int = 0           # addr 12 — sıkışma akım/yük eşiği
+    backoff_offset: int = 0         # addr 13
+    pid_setpoint: float = 0.0       # addr 14 — Bar
+    pid_kp: float = 0.0             # addr 15
+    pid_ki: float = 0.0             # addr 16
+    pid_kd: float = 0.0             # addr 17
+    pid_deadband: float = 0.0       # addr 18 — Bar
+    adc_offset: float = 0.0         # addr 19 — Bar
+    adc_gain: float = 0.0           # addr 20 — çarpan
     
 @dataclass(frozen=True)
 class ComputedPacket:
