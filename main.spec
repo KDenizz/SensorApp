@@ -13,8 +13,11 @@ a = Analysis(
     pathex=[ROOT],
     binaries=pymodbus_binaries + fastapi_binaries + uvicorn_binaries,
     datas=[
-        (os.path.join(ROOT, 'config'),             'config'),
-        (os.path.join(ROOT, 'sensor_gui', 'dist'), os.path.join('sensor_gui', 'dist')),
+    
+        (
+            r"E:\SAGAY\Servo\SensorAppGui\sensor_gui\dist",
+            os.path.join('sensor_gui', 'dist')
+        ),
         (os.path.join(ROOT, 'setup.html'),         '.'),
     ] + pymodbus_datas + fastapi_datas + uvicorn_datas,
     hiddenimports=[
@@ -42,8 +45,19 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True,
-    name='ServoApp', debug=False, strip=False, upx=False, console=True)
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name="Backend",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+)
 
-coll = COLLECT(exe, a.binaries, a.zipfiles, a.datas,
-    strip=False, upx=False, name='ServoApp')
+

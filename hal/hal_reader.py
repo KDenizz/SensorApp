@@ -45,8 +45,8 @@ class HALReader:
 
         rate = hw.get("sample_rate_hz", 50)
         if rate <= 0:
-            logger.warning(f"Geçersiz sample_rate_hz={rate}, varsayılan 50 Hz kullanılıyor.")
-            rate = 50
+            logger.warning(f"Geçersiz sample_rate_hz={rate}, varsayılan 20 Hz kullanılıyor.")
+            rate = 20
         self._sample_rate_hz: int   = rate
         self._loop_delay:     float = 1.0 / self._sample_rate_hz
 
@@ -54,14 +54,20 @@ class HALReader:
         self._reconnect_attempts: int = 0
 
         # Her polling döngüsünde aynı (address, count) kullanılır — bir kez hesapla.
-        self._read_addr, self._read_count = Reg.INPUT.block()
+        #self._read_addr, self._read_count = Reg.INPUT.block()
 
         # ✅ DÜZELTME: main.py'den context.modbus_client kullan (shared!)
         self._client: ModbusRTUClient = context.modbus_client
 
         # Ardışık okuma hatası sayacı — geçici gürültüyü alarm'dan ayırt eder.
         self._consecutive_errors: int = 0
-        self._max_consecutive_errors: int = hw.get("max_consecutive_errors", 10)
+        self._max_consecutive_errors: int = hw.get("max_consecutive_errors", 10)       
+        # Basınç register'ları (22-23) OPSİYONEL. Firmware desteklemiyorsa
+        # ana telemetriyi/bağlantıyı bozmadan otomatik devre dışı kalır.
+        self._pressure_enabled: bool = hw.get("pressure_enabled", True)
+        self._pressure_errors: int = 0
+        self._max_pressure_errors: int = hw.get("max_pressure_errors", 5)
+        self._comms_alarm_active: bool = False
 
     # ------------------------------------------------------------------
     # Ana Döngü
@@ -109,38 +115,116 @@ class HALReader:
     # Register Polling ve Parse
     # ------------------------------------------------------------------
  
+    #sync def _poll_registers(self) -> None:
+    #   if not self._client or not self._client.is_connected:
+    #       raise ConnectionError("Modbus istemcisi bağlı değil.")
+
+    #   # FC03 ile Holding Register oku — cihaz adres 0-23 destekliyor (0-20 kontrol + 22-23 basınç)
+    #   raw = await self._client.read_holding_registers(
+    #       address=0,
+    #       count=24,
+    #   )
+
+    #   if raw is None or len(raw) < 21:  # minimum 21 şart, 24 olursa bonus
+    #       self._consecutive_errors += 1
+    #       logger.warning(f"Holding Register okunamadı ({self._consecutive_errors}/{self._max_consecutive_errors})")
+    #       if self._consecutive_errors >= self._max_consecutive_errors:
+    #           await self._publish_alarm(AlarmCode.COMMUNICATION_LOST, f"{self._consecutive_errors} ardışık hata.")
+    #           raise ConnectionError("Ardışık hata eşiği aşıldı.")
+    #       return
+
+    #   self._consecutive_errors = 0
+
+    #   #if len(raw) < 24:
+    #   #    logger.error(f"Eksik veri: beklenen=21, gelen={len(raw)}")
+    #   #    return
+
+    #   packet = self._parse(raw)
+    #   if packet is None:
+    #       return
+
+    #   await self.context.raw_data_queue.put(packet)
+    #   await self.context.broadcaster.publish("SENSOR_DATA", packet)
+
     async def _poll_registers(self) -> None:
         if not self._client or not self._client.is_connected:
             raise ConnectionError("Modbus istemcisi bağlı değil.")
 
-        # FC03 ile Holding Register oku (addr=9, count=3)
-        raw = await self._client.read_holding_registers(
-            address=0,
-            count=21,
-        )
+        # YENİ
+        # TEK okuma: addr 0-22 (23 register) — C# referans aracıyla birebir aynı
+        # (master.ReadHoldingRegisters(slaveId, 0, 23)). Basınç (21-22) dahil her şey
+        # tek FC03 isteğinde gelir → 50 Hz'de saniyede 100 işlem yerine 20 Hz'de 20.
+        count = 23 if self._pressure_enabled else 21
+        raw = await self._client.read_holding_registers(address=0, count=count)
 
-        if raw is None:
+        # Basınç register'ı olmayan ESKİ firmware'de 23'lük okuma patlarsa bir kez 21'e
+        # düş ve basıncı kalıcı devre dışı bırak — comms'u bozmadan zarif geri çekilme.
+        if (raw is None or len(raw) < count) and self._pressure_enabled and count == 23:
+            # Genel iletişim hatası mı, yoksa basınç-spesifik mi ayırt et.
+            # Eğer aynı anda genel consecutive_errors de artıyorsa bu geçici Modbus
+            # problemi — basınç sayacını artırma, sadece 21'le yeniden dene.
+            if raw is None:
+                # Tamamen yanıt yok → genel iletişim hatası, basınç sayacına dokunma
+                logger.debug("Basınç bloğu atlandı — genel Modbus timeout (basınç sayacı değişmedi).")
+            else:
+                # 21 register geldi ama 23 beklendi → firmware basıncı desteklemiyor olabilir
+                self._pressure_errors += 1
+                if self._pressure_errors >= self._max_pressure_errors:
+                    self._pressure_enabled = False
+                    self._pressure_errors = 0
+                    logger.warning(
+                        f"{self._max_pressure_errors} ardışık basınç okuma hatası → "
+                        "basınç kalıcı devre dışı (eski firmware?). 21 register ile devam."
+                    )
+                else:
+                    logger.debug(
+                        f"Basınç register eksik {self._pressure_errors}/{self._max_pressure_errors} "
+                        "— geçici, ana telemetri etkilenmedi."
+                    )
+            raw = await self._client.read_holding_registers(address=0, count=21)
+        else:
+            # Başarılı 23'lük okumada basınç hata sayacını sıfırla
+            if self._pressure_enabled:
+                self._pressure_errors = 0
+
+        if raw is None or len(raw) < 21:
             self._consecutive_errors += 1
-            logger.warning(f"Holding Register okunamadı ({self._consecutive_errors}/{self._max_consecutive_errors})")
+            logger.warning(
+                f"Holding Register okunamadı "
+                f"({self._consecutive_errors}/{self._max_consecutive_errors})"
+            )
             if self._consecutive_errors >= self._max_consecutive_errors:
-                await self._publish_alarm(AlarmCode.COMMUNICATION_LOST, f"{self._consecutive_errors} ardışık hata.")
+                # Alarm henüz aktif değilse bir kez yayınla — spam önlemi
+                if not self._comms_alarm_active:
+                    self._comms_alarm_active = True
+                    await self._publish_alarm(
+                        AlarmCode.COMMUNICATION_LOST,
+                        f"{self._consecutive_errors} ardışık Modbus hatası — bağlantı koptu."
+                    )
                 raise ConnectionError("Ardışık hata eşiği aşıldı.")
             return
 
+        # Başarılı okuma — hata sayacını ve alarm flag'ini sıfırla
+        if self._consecutive_errors > 0:
+            logger.info("Modbus bağlantısı yeniden sağlandı.")
+        if self._comms_alarm_active:
+            self._comms_alarm_active = False
+            # Bağlantı geri döndü bildirimini frontend'e ilet
+            await self.context.broadcaster.publish(
+                "STATE_CHANGED", {"state": "RUNNING"}
+            )
         self._consecutive_errors = 0
 
-        if len(raw) < 21:
-            logger.error(f"Eksik veri: beklenen=21, gelen={len(raw)}")
-            return
-
         packet = self._parse(raw)
+
         if packet is None:
             return
 
         await self.context.raw_data_queue.put(packet)
         await self.context.broadcaster.publish("SENSOR_DATA", packet)
+    
+    def _parse(self, raw: list[int]) -> Optional[SensorPacket]:
 
-    def _parse(self, raw: list[int]) -> Optional[SensorPacket]: 
         h = Reg.HOLDING
 
         # Konum & yük — signed dönüşüm artık RegisterDef.from_uint16 ile (elle çevirme YOK)
@@ -153,9 +237,11 @@ class HALReader:
         steps = position % step_resolution
 
         return SensorPacket(
-            p1_raw=0.0,
-            p2_raw=0.0,
+
+            p1_raw=(raw[21] / 1000.0) if len(raw) > 21 else 0.0,
+            p2_raw=(raw[22] / 1000.0) if len(raw) > 22 else 0.0,
             temp_k=0.0,
+
             motor_pos_ticks=position,
             motor_turns=turns,
             motor_steps=steps,
@@ -179,8 +265,9 @@ class HALReader:
             adc_gain=h.ADC_GAIN.from_uint16(raw[h.ADC_GAIN.address]),
         )
 
+    """
     def _check_status_bits(self, status_word: int) -> None:
-        """Status word bit kontrolü"""
+        #Status word bit kontrolü
         if status_word & StatusBits.SIGNAL_ERROR:
             asyncio.create_task(
                 self._publish_alarm(
@@ -194,6 +281,8 @@ class HALReader:
 
         if status_word & StatusBits.CALIBRATION_DONE:
             logger.debug("Durum: Kalibrasyon tamamlandı (status_word Bit0).")
+
+    """
 
     # ------------------------------------------------------------------
     # Yardımcı

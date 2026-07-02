@@ -1,12 +1,14 @@
 block_cipher = None
-
+import os
 from PyInstaller.utils.hooks import collect_all
+
+ROOT = os.path.dirname(os.path.abspath(SPEC))
 
 pymodbus_datas, pymodbus_binaries, pymodbus_hiddenimports = collect_all('pymodbus')
 
 a = Analysis(
     ['modbus_simulator.py'],
-    pathex=['C:\\Users\\kabuk\\Desktop\\SensorApp'],
+    pathex=[ROOT],
     binaries=pymodbus_binaries,
     datas=pymodbus_datas,
     hiddenimports=[
@@ -35,8 +37,9 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='modbus_simulator',
+    name="Simulator",
     debug=False,
-    console=True,
-    icon=None,
+    strip=False,
+    upx=True,
+    console=True
 )

@@ -128,7 +128,6 @@ class ConfigParser:
         if not self._is_loaded:
             raise ConfigError("Konfigürasyonlar yüklenmeden erişim sağlanamaz. Önce load_all() çağrılmalı.")
 
-        # Donanım ayarlarını güncelle
     def save_hardware(self, new_config: Dict[str, Any]) -> None:
         """
         hardware.yaml dosyasını atomik olarak günceller.

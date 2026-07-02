@@ -18,12 +18,14 @@ Desteklenen komutlar:
 import json
 import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import asyncio
 
 from core.app_context import AppContext
 from core.data_types  import MotorCommand, CommandType
 
 logger = logging.getLogger(__name__)
-
+_last_goto: dict = {"ticks": -1, "time": 0.0}
+GOTO_DEBOUNCE_S = 0.3
 
 def create_app(context: AppContext) -> FastAPI:
     """
@@ -65,6 +67,8 @@ def create_app(context: AppContext) -> FastAPI:
 # ----------------------------------------------------------------
 # Komut İşleyici
 # ----------------------------------------------------------------
+
+
 
 async def _handle_client_message(raw_data: str, context: AppContext) -> None:
     """
@@ -133,11 +137,12 @@ async def _handle_client_message(raw_data: str, context: AppContext) -> None:
     # ----------------------------------------------------------
     elif cmd_type == "OPEN_FULL":
         logger.info("Frontend: Tam Aç (TTL) komutu alındı.")
-        command = MotorCommand(
-            type=CommandType.OPEN_FULL,
-            priority=1,
-        )
-        await context.command_queue.put((1, command))
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_MODE, value=3.0, priority=1
+        )))
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.OPEN_FULL, priority=1
+        )))
 
     # ----------------------------------------------------------
     # TAM KAPAT (TTL)
@@ -146,23 +151,37 @@ async def _handle_client_message(raw_data: str, context: AppContext) -> None:
     # ----------------------------------------------------------
     elif cmd_type == "CLOSE_FULL":
         logger.info("Frontend: Tam Kapat (TTL) komutu alındı.")
-        command = MotorCommand(
-            type=CommandType.CLOSE_FULL,
-            priority=1,        )
-        await context.command_queue.put((1, command))
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_MODE, value=3.0, priority=1
+        )))
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.CLOSE_FULL, priority=1
+        )))
 
 
+
+    # process_message içinde, GOTO_POSITION bloğuna girmeden önce:
     elif cmd_type == "GOTO_POSITION":
-        turns = int(payload.get("turns", 0))
-        step  = int(payload.get("step", 0))
-        # addr 3 = mutlak toplam tick. Tek MOVE_ABSOLUTE komutu (kompozit):
-        # mod+hedef sırası garantili, addr 1 (kalibrasyon referansı) ASLA ezilmez.
+        turns    = int(payload.get("turns", 0))
+        step     = int(payload.get("step", 0))
         step_res = int(context.config.hardware.get("step_resolution", 1000))
         target_ticks = turns * step_res + step
+
+        # Debounce: aynı hedef 300ms içinde tekrar gelirse yok say
+        now = asyncio.get_running_loop().time()
+        if target_ticks == _last_goto["ticks"] and (now - _last_goto["time"]) < GOTO_DEBOUNCE_S:
+            logger.debug(f"GOTO debounce: aynı hedef {target_ticks} tick, atlanıyor.")
+            return
+        _last_goto["ticks"] = target_ticks
+        _last_goto["time"]  = now
+
         if not (0 <= target_ticks <= 32767):
             logger.warning(f"GOTO reddedildi: hedef tick {target_ticks} aralık dışı (0–32767).")
             return
         logger.info(f"Frontend: GOTO_POSITION → {turns} tur + {step} adım = {target_ticks} tick")
+        await context.command_queue.put((1, MotorCommand(
+            type=CommandType.SET_MODE, value=3.0, priority=1
+        )))
         await context.command_queue.put((1, MotorCommand(
             type=CommandType.MOVE_ABSOLUTE, value=float(target_ticks), priority=1
         )))

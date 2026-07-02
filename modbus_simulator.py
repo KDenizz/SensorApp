@@ -83,6 +83,11 @@ MODE_TTL    = 4   # fast open/close — artık mode_select üzerinden
 MODE_PID    = 5   # dahili PID
 MODE_SMART  = 6   # akıllı tork
 
+
+# modbus_simulator.py — diğer HR_ sabitlerinin yanına (örn. HR_ADC_GAIN'den sonra)
+HR_P1_PRESSURE = 21
+HR_P2_PRESSURE = 22
+
 # ---------------------------------------------------------------------------
 # Motor Durumu
 # ---------------------------------------------------------------------------
@@ -250,6 +255,8 @@ def simulation_loop(context: ModbusServerContext, state: MotorState) -> None:
             pos_out   = state.current_position  # signed int16
             load_out  = state.load              # signed int16
             calib_out = 1 if state.is_calibrated else 0
+            ratio     = (state._total_steps_f / state.max_total_steps) if state.max_total_steps > 0 else 0.0  # ← buraya taşı
+
 
             # signed int16 → uint16 dönüşümü (negatif değerler için)
             if pos_out < 0:
@@ -261,6 +268,12 @@ def simulation_loop(context: ModbusServerContext, state: MotorState) -> None:
         slave.setValues(3, HR_CURRENT_POSITION,   [pos_out])
         slave.setValues(3, HR_CURRENT_LOAD,        [load_out])
         slave.setValues(3, HR_CALIBRATION_STATUS,  [calib_out])
+
+    
+
+        # ── 8b. Basınç simülasyonu (addr 21=P1 giriş, 22=P2 çıkış) ──
+        slave.setValues(3, HR_P1_PRESSURE, [5000])           # 5.000 bar
+        slave.setValues(3, HR_P2_PRESSURE, [int(5000 * ratio)])
 
         # ── 9. Periyodik log ──────────────────────────────────────────
         if tick % 20 == 0:

@@ -1,19 +1,12 @@
 baud_rate: 230400
+cd: 0.65
+cone_angle_deg: 45
 max_revolutions: 5
-modbus_timeout: 0.1
-port: COM8
-sample_rate_hz: 50
+max_stroke_mm: 15
+modbus_timeout: 0.5
+orifice_diameter_mm: 10
+port: COM7
+sample_rate_hz: 20
 slave_id: 1
 step_resolution: 1000
-# --- Vana Profili ---
-# DOĞRUSU (ValveSettings tipiyle eşleşen):
 thread_pitch_mm: 1.5
-max_stroke_mm: 15.0
-orifice_diameter_mm: 8.0
-cone_angle_deg: 45.0
-cd: 0.65
-# --- Vana Profili ---
-orifice_diameter_mm: 10.0
-thread_pitch_mm: 1.5
-max_stroke_mm: 15.0
-cd: 0.65

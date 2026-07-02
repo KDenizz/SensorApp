@@ -31,11 +31,23 @@ from pathlib import Path
 from typing import Tuple
 
 import yaml
+import sys
 
 logger = logging.getLogger(__name__)
 
-# YAML dosyasının varsayılan konumu — main.py'nin bulunduğu dizine göre
-_DEFAULT_YAML_PATH = Path(__file__).parent.parent / "config" / "modbus_registers.yaml"
+
+if getattr(sys, "frozen", False):
+    _DEFAULT_YAML_PATH = (
+        Path(sys.executable).parent
+        / "config"
+        / "modbus_registers.yaml"
+    )
+else:
+    _DEFAULT_YAML_PATH = (
+        Path(__file__).resolve().parent.parent
+        / "config"
+        / "modbus_registers.yaml"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from multiprocessing import context
 import signal
 import sys
 from typing import List
@@ -48,14 +47,24 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+def get_base_path():
+    """Çalışma dizinini bulur (Script veya EXE için)"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
 
+# Config klasörünü dinamik yoldan işaret et
+config_klasoru_yolu = os.path.join(get_base_path(), 'config')
 
 # Logging yapılandırması
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
+from core.log_setup import (
+    setup_logging,
+    install_asyncio_exception_handler,
+    log_port_diagnostics,
+    enable_modbus_debug,
 )
+setup_logging()  # Reg.load() ve AppContext()'ten ÖNCE çalışmalı (modül düzeyinde OK)
 logger = logging.getLogger(__name__)
 
 
@@ -73,7 +82,7 @@ async def main() -> None:
 
     # event_queue: ws_server → main_controller arası iletişim köprüsü
     # AppContext'e ekliyoruz (AppContext'e alan eklemek yerine lazy init)
-    context.event_queue: asyncio.Queue = asyncio.Queue()
+    context.event_queue = asyncio.Queue()
 
         # 2. Register Haritasını Yükle  ← YENİ BLOK
     # HALReader ve HALWriter oluşturulmadan ÖNCE çağrılmalıdır.
@@ -125,7 +134,10 @@ async def main() -> None:
 
         async def _delayed_restart() -> None:
             await asyncio.sleep(1.5)
-            subprocess.Popen([sys.executable] + sys.argv)
+            if getattr(sys, 'frozen', False):
+                subprocess.Popen([sys.executable])
+            else:
+                subprocess.Popen([sys.executable] + sys.argv)
             os._exit(0)
 
         asyncio.create_task(_delayed_restart())
@@ -186,6 +198,8 @@ async def main() -> None:
         logger.warning(f"Frontend dist klasörü bulunamadı: {frontend_path}")
 
     hw = context.config.hardware
+    if hw.get("debug_modbus", False):
+        enable_modbus_debug()
     shared_modbus = ModbusRTUClient(
         port=hw.get("port", "COM7"),
         baudrate=hw.get("baud_rate", 230400),
@@ -207,8 +221,11 @@ async def main() -> None:
 
     context.modbus_client = shared_modbus
     connected = await shared_modbus.connect()
+    
+    
     if not connected:
         logger.warning(f"Modbus bağlantısı kurulamadı (port={hw.get('port')}).")
+        log_port_diagnostics(hw.get("port", "COM7"))
         logger.warning("Frontend açılacak. Setup sayfasından port seçin: http://localhost:8000/setup")
         context.modbus_connected = False
     else:
@@ -240,6 +257,8 @@ async def main() -> None:
     # 5. OS Sinyal Yönetimi (Graceful Shutdown)
     # ------------------------------------------------------------------
     loop = asyncio.get_running_loop()
+    install_asyncio_exception_handler(loop)
+
 
     def _on_shutdown_signal() -> None:
         logger.warning("Kapatma sinyali alındı. Sistem güvenli şekilde kapatılıyor...")

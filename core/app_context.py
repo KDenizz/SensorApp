@@ -38,7 +38,7 @@ class AppContext:
 
         # 1. Konfigürasyon Yöneticisi (Fail-Fast & Log)
         if getattr(sys, 'frozen', False):
-            _cfg = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent)) / "config"   # exe → E:\ServoApp\config
+            _cfg = Path(sys.executable).parent / "config"   # exe → E:\ServoApp\config
         else:
             _cfg = Path(__file__).resolve().parent.parent / "config"  # core/ → proje_kökü/config
         self.config = ConfigParser(config_root=str(_cfg))

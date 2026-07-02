@@ -38,7 +38,7 @@ class HALWriter:
     """
 
     # Kuyruk boşsa bu kadar bekle
-    _QUEUE_TIMEOUT: float = 0.01
+    _QUEUE_TIMEOUT: float = 0.1
 
     def __init__(self, context: "AppContext") -> None:
         self.context = context
@@ -175,29 +175,9 @@ class HALWriter:
             # Önce hedef (addr 3), SONRA mod (3): mod aktifleşince hedef hazır olsun.
             if not await self._write(h.TARGET_STEP, target_ticks):
                 raise IOError("Tam Aç: hedef tick (addr 3) yazılamadı.")
-            if not await self._write(h.MODE_SELECT, 3):
-                raise IOError("Tam Aç: Mod 3 yazılamadı.")
+
         
-            """      
-        # ----------------------------------------------------------
-        # MUTLAK KONUM — Dijital Adım Modu (Mod 3)
-        # ----------------------------------------------------------
-        elif command.type == CommandType.MOVE_ABSOLUTE:
-            # Mod 3: Toplam tick değerinden tur ve adımı hesapla
-            step_resolution: int = self.context.config.hardware.get("step_resolution", 1000)
-            total_ticks = int(command.value)
-            target_rev  = total_ticks // step_resolution
-            target_step = total_ticks % step_resolution
-
-            logger.info(f"HALWriter: MOVE_ABSOLUTE → rev={target_rev}, step={target_step}")
-
-            ok_rev  = await self._write(h.TARGET_REVOLUTIONS, target_rev)
-            ok_step = await self._write(h.TARGET_STEP, target_step)
-
-            if not (ok_rev and ok_step):
-                raise IOError("Mutlak konum register'lara yazılamadı.")
-            """
-
+      
 
         # ----------------------------------------------------------
         # SET_SPEED (Henüz register haritasında yok)
@@ -238,8 +218,7 @@ class HALWriter:
             logger.info(f"HALWriter: GOTO → Mod 3, hedef tick={target_ticks} (addr 3 mutlak)")
             if not await self._write(h.TARGET_STEP, target_ticks):
                 raise IOError("GOTO: hedef tick (addr 3) yazılamadı.")
-            if not await self._write(h.MODE_SELECT, 3):
-                raise IOError("GOTO: Mod 3 yazılamadı.")
+
 
         # MOD SEÇİMİ
         elif command.type == CommandType.SET_MODE:
@@ -336,8 +315,7 @@ class HALWriter:
             logger.info("HALWriter: Tam Kapat → Mod 3, hedef tick=0 (home)")
             if not await self._write(h.TARGET_STEP, 0):
                 raise IOError("Tam Kapat: hedef tick (addr 3) yazılamadı.")
-            if not await self._write(h.MODE_SELECT, 3):
-                raise IOError("Tam Kapat: Mod 3 yazılamadı.")
+
 
         else:
             logger.warning(f"HALWriter: Bilinmeyen komut tipi: {command.type}")
